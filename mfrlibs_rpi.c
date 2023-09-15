@@ -192,6 +192,7 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         mfrlib_log("PRODUCT CLASS= %s\t len=%d\n", data->buf, data->bufLen);
         break;
     case mfrSERIALIZED_TYPE_SERIALNUMBER:
+    case mfrSERIALIZED_TYPE_MANUFACTURING_SERIALNUMBER:
         data->buf = (char *)malloc(sizeof(char) * MAX_BUF_LEN);
         memset(data->buf, '\0', sizeof(char) * MAX_BUF_LEN);
         memset(cmd, 0, sizeof(char) * 100);
