@@ -303,7 +303,7 @@ WIFI_API_RESULT WIFI_GetCredentials(WIFI_DATA *pData)
 {
    if (pData == NULL) 
    {
-        return WIFI_API_RESULT_INVALID_PARAM;
+        return WIFI_API_RESULT_NULL_PARAM;
    }
  
    return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
@@ -313,7 +313,7 @@ WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
 {
     if (pData == NULL)
     {
-        return WIFI_API_RESULT_INVALID_PARAM;
+        return WIFI_API_RESULT_NULL_PARAM;
     }
  
     return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
