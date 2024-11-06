@@ -18,7 +18,7 @@ if [ -z "$LOG_PATH" ]; then
 fi
 
 if [ -z "$FLASHAPPLOGFILE" ]; then
-    FLASHAPPLOGFILE="$LOG_PATH/flashapp.log"
+    FLASHAPPLOGFILE="$LOG_PATH/swupdate.log"
 fi
 
 EXTBLOCK="$PERSISTENT_PATH/ota/extblock"
