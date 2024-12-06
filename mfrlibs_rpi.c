@@ -102,8 +102,8 @@ int getValueFromVersionFile(const char *key, char separator, char *valueOut, siz
         if (strncmp(line, key, keyLen) == 0 && line[keyLen] == separator) {
             char *value = line + keyLen + 1;
             while (*value == ' ' && *value != '\0') value++;
-            strncpy(valueOut, value, maxLen);
-            valueOut[strcspn(valueOut, "\n")] = '\0';
+            strncpy(valueOut, value, maxLen - 1);
+            valueOut[maxLen - 1] = '\0'; // Ensure null-termination
             found = 1;
             retValue = 0;
             break;
@@ -256,7 +256,8 @@ int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOu
 
         while ((read = getline(&line, &len, fp)) != -1) {
             if (strstr(line, keyIn) != NULL) {
-                strncpy(buffer, line, MAX_BUF_LEN);
+                strncpy(buffer, line, MAX_BUF_LEN - 1);
+                buffer[MAX_BUF_LEN - 1] = '\0';
                 break;
             }
         }
@@ -269,7 +270,8 @@ int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOu
             char *value = strchr(buffer, '=');
             if (value) {
                 value++;
-                strncpy(valueOut, value, size);
+                strncpy(valueOut, value, size - 1);
+                valueOut[size - 1] = '\0';
                 ret = 0;
             }
         }
@@ -311,7 +313,8 @@ int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t siz
 
         while ((read = getline(&line, &len, fp)) != -1) {
             if (strstr(line, keyIn) != NULL) {
-                strncpy(buffer, line, ((size > MAX_BUF_LEN) ? MAX_BUF_LEN : size));
+                strncpy(buffer, line, MAX_BUF_LEN - 1);
+                buffer[MAX_BUF_LEN - 1] = '\0';
                 break;
             }
         }
@@ -327,7 +330,8 @@ int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t siz
                 while ((*value == ' ') && (*value != '\0')) {
                     value++;
                 }
-                strncpy(valueOut, value, size);
+                strncpy(valueOut, value, size - 1);
+                valueOut[size - 1] = '\0';
                 ret = 0;
             }
         }
@@ -348,8 +352,8 @@ int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t siz
  */
 void mfrFreeBuffer(char *buf)
 {
-    if (buf && (free(buf) != NULL)) {
-        mfrlib_log("mfrFreeBuffer free() error.\n");
+    if (buf) {
+        free(buf);
     }
 }
 
