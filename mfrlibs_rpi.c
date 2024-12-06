@@ -41,8 +41,6 @@ const char defaultSerialNumber[] = "0000000000000000";
 const char defaultHardwareVersion[] = "RASPBERRYPI_3_V01";
 const char defaultSoftwareVersion[] = "2.0";
 const char defaultMacAddress[] = "00:00:00:00:00:00";
-const char defaultBluetoothMacAddress[] = "00:00:00:00:00:00";
-const char defaultWifiMacAddress[] = "00:00:00:00:00:00";
 
 void mfrlib_log(const char *format, ...)
 {
@@ -271,9 +269,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
     case mfrSERIALIZED_TYPE_MOCAMAC:
     case mfrSERIALIZED_TYPE_HDMIHDCP:
     case mfrSERIALIZED_TYPE_PDRIVERSION:
-        data->buf = (char *)malloc(sizeof(char) * MAX_BUF_LEN);
-        memset(data->buf, '\0', sizeof(char) * MAX_BUF_LEN);
-        strcpy(data->buf, "Not implemented");
+        data->buf = (char *)malloc(sizeof("Not implemented")+1);
+        if (data->buf != NULL) {
+            strcpy(data->buf, "Not implemented");
+        }
         break;
     case mfrSERIALIZED_TYPE_MAX:
         data->buf = (char *)malloc(sizeof(char) * MAX_BUF_LEN);
@@ -296,11 +295,14 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         if (fp)
         {
             fgets(buffer, sizeof(buffer), fp);
-            if (strlen(buffer) > 1) {
+            if (strlen(buffer) > 1) 
+            {
                 buffer[strcspn(buffer, "\n")] = 0;
                 strncpy(data->buf, buffer, MAX_BUF_LEN - 1);
                 data->buf[MAX_BUF_LEN - 1] = '\0';
-                } else {
+            }
+            else 
+            {
                 strcpy(data->buf, defaultMacAddress);
             }
             data->bufLen = strlen(data->buf);
@@ -319,18 +321,21 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         if ((fp = popen(cmd, "r")) == NULL)
         {
             mfrlib_log("popen failed.");
-            strcpy(data->buf, defaultBluetoothMacAddress);
+            strcpy(data->buf, defaultMacAddress);
             data->bufLen = strlen(data->buf);
         }
         if (fp)
         {
             fgets(buffer, sizeof(buffer), fp);
-            if (strlen(buffer) > 1) {
+            if (strlen(buffer) > 1)
+            {
                 buffer[strcspn(buffer, "\n")] = 0;
                 strncpy(data->buf, buffer, MAX_BUF_LEN - 1);
                 data->buf[MAX_BUF_LEN - 1] = '\0';
-            } else {
-                strcpy(data->buf, defaultBluetoothMacAddress);
+            } 
+            else
+            {
+                strcpy(data->buf, defaultMacAddress);
             }
             data->bufLen = strlen(data->buf);
             pclose(fp);
@@ -348,18 +353,21 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         if ((fp = popen(cmd, "r")) == NULL)
         {
             mfrlib_log("popen failed.");
-            strcpy(data->buf, defaultWifiMacAddress);
+            strcpy(data->buf, defaultMacAddress);
             data->bufLen = strlen(data->buf);
         }
         if (fp)
         {
             fgets(buffer, sizeof(buffer), fp);
-            if (strlen(buffer) > 1) {
+            if (strlen(buffer) > 1) 
+            {
                 buffer[strcspn(buffer, "\n")] = 0;
                 strncpy(data->buf, buffer, MAX_BUF_LEN - 1);
                 data->buf[MAX_BUF_LEN - 1] = '\0';
-            } else {
-                strcpy(data->buf, defaultWifiMacAddress);
+            } 
+            else 
+            {
+                strcpy(data->buf, defaultMacAddress);
             }
             data->bufLen = strlen(data->buf);
             pclose(fp);
