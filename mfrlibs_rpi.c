@@ -36,11 +36,13 @@
 
 #define MAX_BUF_LEN 255
 #define MAC_ADDRESS_SIZE 32
+#define LOG_CONFIG_FILE "/etc/debug.ini"
 
 const char defaultDescription[] = "RaspberryPi RDKV Reference Device";
 const char defaultProductClass[] = "RDKV";
 const char defaultSoftwareVersion[] = "2.0";
 static int isInitialized = 0;
+static int isDebugEnabled = 0;
 
 /* Mechanism to make this a single instance */
 #ifdef ENABLE_SINGLE_INSTANCE_LOCK
@@ -108,17 +110,47 @@ int isLibraryInitialized(void)
 /* Logging function */
 void mfrlib_log(const char *format, ...)
 {
-    int total = 0;
-    va_list args;
-    int buf_index;
+    if (!isDebugEnabled) {
+        return;
+    }
 
-#ifdef DEBUG
+    va_list args;
     va_start(args, format);
-    // log to console
-    total = vfprintf(stdout, format, args);
-    fflush(stdout);
+    vfprintf(stdout, format, args);
     va_end(args);
-#endif
+}
+
+/**
+ * @brief enable/disable debug logging
+ * @info This function reads the debug.ini configuration file and enables logging if debug is enabled
+ */
+void configMFRLibLogging(void)
+{
+    if (access(LOG_CONFIG_FILE, F_OK) == -1) {
+        perror("configMFRLibLogging error access F_OK '%s'.\n", LOG_CONFIG_FILE);
+        return;
+    }
+    FILE *file = fopen(LOG_CONFIG_FILE, "r");
+    if (!file) {
+        perror("configMFRLibLogging error fopen '%s'.\n", LOG_CONFIG_FILE);
+        return;
+    }
+
+    char line[MAX_BUF_LEN] = {0};
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\n")] = '\0';
+        // Check for the LOG.RDK.MFRMGR entry
+        if (strncmp(line, "LOG.RDK.MFRMGR", 14) == 0) {
+            if (strstr(line, "DEBUG") && !strstr(line, "!DEBUG")) {
+                isDebugEnabled = 1;
+            } else {
+                isDebugEnabled = 0;
+            }
+            break;
+        }
+    }
+
+    fclose(file);
 }
 
 /* MFR wrapper implementations */
@@ -918,6 +950,8 @@ bool isValidMfrImageType(mfrImageType_t type) {
 
 mfrError_t mfr_init(void)
 {
+    configMFRLibLogging();
+
     if (isInitialized) {
         mfrlib_log("mfr_init already initialized\n");
         return mfrERR_ALREADY_INITIALIZED;
