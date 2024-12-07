@@ -68,10 +68,13 @@ const char* mfrSerializedTypeString[] = {
     NULL
 };
 
-mfrSerializedType_t getmfrSerializedTypeFromString(const char *pString)
+mfrSerializedType_t getmfrSerializedTypeFromString(char *pString)
 {
     mfrSerializedType_t i;
-    for (i = mfrSERIALIZED_TYPE_MAX; mfrSerializedTypeString[i]; i++) {
+    if (!pString) {
+        return mfrSERIALIZED_TYPE_MAX;
+    }
+    for (i = mfrSERIALIZED_TYPE_MANUFACTURER; mfrSerializedTypeString[i]; i++) {
         if (strcmp(pString, mfrSerializedTypeString[i]) == 0) {
             break;
         }
@@ -119,7 +122,13 @@ int main(int argc, char **argv) {
         while ((c = getopt(argc, argv, "r:a")) != -1) {
             switch (c) {
                 case 'r':
-                    printSerializedData(getmfrSerializedTypeFromString(optarg));
+                    if (optarg) {
+                        printSerializedData(getmfrSerializedTypeFromString(optarg));
+                    } else {
+                        printf("Option -r requires an argument\n");
+                        showUsage(argv[0]);
+                        return -1;
+                    }
                     break;
                 case 'a':
                     for (mfrSerializedType_t i = mfrSERIALIZED_TYPE_MANUFACTURER; mfrSerializedTypeString[i]; i++) {
