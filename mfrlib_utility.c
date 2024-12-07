@@ -112,7 +112,7 @@ void printSerializedData(mfrSerializedType_t type)
             printf("mfrSerializedData.freeBuf is NULL\n");
         }
     } else {
-        printf("mfrGetSerializedData failed for '%s', error code '%d'\n", mfrSerializedTypeString[type], retVal);
+        printf("mfrGetSerializedData failed for '%s', error code '%x'\n", mfrSerializedTypeString[type], retVal);
     }
 }
 
