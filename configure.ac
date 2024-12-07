@@ -49,6 +49,14 @@ AC_ARG_ENABLE([thermalprotection], [--enable-thermalprotection "Enable thermal p
        esac], [thermalprotection=false])
 AM_CONDITIONAL([THERMAL_PROTECTION_ENABLED], [test x$thermalprotection = xtrue])
 
+AC_ARG_ENABLE([single-instance-lock],
+    AS_HELP_STRING([--enable-single-instance-lock], [Enable single instance lock mechanism]),
+    [enable_single_instance_lock=$enableval], [enable_single_instance_lock=no])
+
+if test "x$enable_single_instance_lock" = "xyes"; then
+    AC_DEFINE([ENABLE_SINGLE_INSTANCE_LOCK], [1], [Enable single instance lock mechanism])
+fi
+
 # Checks for library functions.
 AC_FUNC_MALLOC
 

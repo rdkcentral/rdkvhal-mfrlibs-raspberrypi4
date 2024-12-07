@@ -40,8 +40,11 @@
 const char defaultDescription[] = "RaspberryPi RDKV Reference Device";
 const char defaultProductClass[] = "RDKV";
 const char defaultSoftwareVersion[] = "2.0";
+static int isInitialized = 0;
 
 /* Mechanism to make this a single instance */
+#ifdef ENABLE_SINGLE_INSTANCE_LOCK
+
 #define MFRHAL_LOCK_FILE "/run/mfrhallibrary.lock"
 static int lockFd = -1;
 static int lockRefCount = 0;
@@ -83,6 +86,23 @@ int releaseLock(void)
         return 0;
     }
     return -1;
+}
+
+#endif /* ENABLE_SINGLE_INSTANCE_LOCK */
+
+int isLibraryInitialized(void)
+{
+    if (!isInitialized) {
+        return 0;
+    }
+
+#ifdef ENABLE_SINGLE_INSTANCE_LOCK
+    if (lockFd == -1) {
+        return 0;
+    }
+#endif
+
+    return 1;
 }
 
 /* Logging function */
@@ -449,8 +469,8 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
     FILE *fp = NULL;
     mfrError_t ret = mfrERR_NONE;
 
-    if (lockFd == -1) {
-        mfrlib_log("mfrSetSerializedData not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("mfrGetSerializedData not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
 
@@ -751,21 +771,23 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
 
 mfrError_t mfrSetSerializedData( mfrSerializedType_t type,  mfrSerializedData_t *data)
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrSetSerializedData not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
+
     if (!data || !isValidMfrSerializedType(type)) {
         mfrlib_log("Invalid mfrSerializedType_t or data ptr is NULL\n");
         return mfrERR_INVALID_PARAM;
     }
+
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
 mfrError_t mfrDeletePDRI()
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrDeletePDRI not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
     return mfrERR_OPERATION_NOT_SUPPORTED;
@@ -773,28 +795,43 @@ mfrError_t mfrDeletePDRI()
 
 mfrError_t mfrScrubAllBanks()
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrScrubAllBanks not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
+bool isValidMfrBLPattern(mfrBlPattern_t pattern)
+{
+    if (pattern >= mfrBL_PATTERN_NORMAL && pattern < mfrBL_PATTERN_MAX) {
+        return true;
+    }
+    return false;
+}
+
 mfrError_t mfrSetBootloaderPattern(mfrBlPattern_t pattern)
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrSetBootloaderPattern not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
+
+    if (!isValidMfrBLPattern(pattern)) {
+        mfrlib_log("mfrSetBootloaderPattern Invalid mfrBlPattern_t\n");
+        return mfrERR_INVALID_PARAM;
+    }
+
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
 mfrError_t mfrSetBlSplashScreen(const char *path)
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrSetBlSplashScreen not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
+
     if (!path) {
         mfrlib_log("mfrSetBlSplashScreen invalid input\n");
         return mfrERR_INVALID_PARAM;
@@ -804,113 +841,141 @@ mfrError_t mfrSetBlSplashScreen(const char *path)
 
 mfrError_t mfrClearBlSplashScreen(void)
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrClearBlSplashScreen not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
+
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
 mfrError_t mfrGetSecureTime(uint32_t *timeptr)
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrGetSecureTime not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
+
     if (!timeptr) {
         mfrlib_log("mfrGetSecureTime invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
+
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
 mfrError_t mfrSetSecureTime(uint32_t *timeptr)
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrSetSecureTime not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
+
     if (!timeptr) {
         mfrlib_log("mfrSetSecureTime invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
+
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
 mfrError_t mfrSetFSRflag(uint16_t *newFsrFlag)
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrSetFSRflag not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
+
     if (!newFsrFlag) {
         mfrlib_log("mfrSetFSRflag invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
+
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
 mfrError_t mfrGetFSRflag(uint16_t *newFsrFlag)
 {
-    if (lockFd == -1) {
-        mfrlib_log("mfrGetFSRflag not initialized\n");
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
+
     if (!newFsrFlag) {
         mfrlib_log("mfrGetFSRflag invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
+
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
-mfrError_t mfrWriteImage(const char *str, const char *str1,
-                         mfrImageType_t imageType, mfrUpgradeStatusNotify_t upgradeStatus)
-{
-    // TODO: change FlashApp.sh logic to use mfrWriteImage
-    return mfrERR_OPERATION_NOT_SUPPORTED;
+bool isValidMfrImageType(mfrImageType_t type) {
+    if (type >= mfrIMAGE_TYPE_CDL && type < mfrIMAGE_TYPE_MAX) {
+        return true;
+    }
+    return false;
 }
 
 mfrError_t mfr_init(void)
 {
-    if (lockFd != -1) {
+    if (isInitialized) {
         mfrlib_log("mfr_init already initialized\n");
         return mfrERR_ALREADY_INITIALIZED;
     }
 
+#ifdef ENABLE_SINGLE_INSTANCE_LOCK
     if (acquireLock() == -1) {
         mfrlib_log("mfr_init acquireLock failed\n");
         return mfrERR_ALREADY_INITIALIZED;
     }
+#endif /* ENABLE_SINGLE_INSTANCE_LOCK */
+
+    isInitialized = 1;
     return mfrERR_NONE;
 }
 
 mfrError_t mfr_term(void)
 {
-    if (lockFd == -1) {
+    if (!isInitialized) {
         mfrlib_log("mfr_term not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
 
+#ifdef ENABLE_SINGLE_INSTANCE_LOCK
     if (releaseLock() == -1) {
         mfrlib_log("mfr_term releaseLock failed\n");
         return mfrERR_NOT_INITIALIZED;
     }
+#endif /* ENABLE_SINGLE_INSTANCE_LOCK */
+
+    isInitialized = 0;
     return mfrERR_NONE;
+}
+
+mfrError_t mfrWriteImage(const char *name,  const char *path, mfrImageType_t type,  mfrUpgradeStatusNotify_t notify);
+{
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
+        return mfrERR_NOT_INITIALIZED;
+    }
+
+    if (!name || !path || !isValidMfrImageType(type)) {
+        mfrlib_log("mfrWriteImage invalid input\n");
+        return mfrERR_INVALID_PARAM;
+    }
+    // TODO: change FlashApp.sh logic to use mfrWriteImage
+    return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
 /****************************** MFR WIFI APIs ********************************/
 
 WIFI_API_RESULT WIFI_GetCredentials(WIFI_DATA *pData)
 {
-   if (NULL == pData) {
-        return WIFI_API_RESULT_NULL_PARAM;
-   }
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
+        return mfrERR_NOT_INITIALIZED;
+    }
 
-   return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
-}
-
-WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
-{
     if (NULL == pData) {
         return WIFI_API_RESULT_NULL_PARAM;
     }
@@ -918,7 +983,38 @@ WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
     return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
 }
 
+bool isValidWIFIDATAType(WIFI_DATA_TYPE type)
+{
+    if ((type > WIFI_DATA_UNKNOWN)  && (type < WIFI_DATA_MAX)) {
+        return true;
+    }
+    return false;
+}
+
+WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
+{
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
+        return mfrERR_NOT_INITIALIZED;
+    }
+
+    if (NULL == pData) {
+        return WIFI_API_RESULT_NULL_PARAM;
+    }
+
+    if (!isValidWIFIDATAType(pData->type)) {
+        return WIFI_API_RESULT_INVALID_PARAM;
+    }
+
+    return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
+}
+
 WIFI_API_RESULT WIFI_EraseAllData(void)
 {
+    if (!isLibraryInitialized()) {
+        mfrlib_log("isLibraryInitialized not initialized\n");
+        return mfrERR_NOT_INITIALIZED;
+    }
+
     return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
 }

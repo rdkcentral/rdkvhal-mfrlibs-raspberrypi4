@@ -17,6 +17,7 @@
 # limitations under the License.
 ##########################################################################
 
+AM_CFLAGS = @CFLAGS@
 lib_LTLIBRARIES = libRDKMfrLib.la
 
 libRDKMfrLib_la_SOURCES=mfrlibs_rpi.c
@@ -27,7 +28,7 @@ endif
 libRDKMfrLib_la_CFLAGS=$(RDKMFRLIBS_CFLAGS)
 libRDKMfrLib_la_LIBADD=$(RDKMFRLIBS_LIBS)
 
-bin_PROGRAMS = mfrUtility
-mfrUtility_SOURCES = mfrlib_utility.c
-mfrUtility_LDADD = libRDKMfrLib.la
-mfrUtility_CFLAGS = $(RDKMFRLIBS_CFLAGS)
+bin_PROGRAMS = mfrHalUtility
+mfrHalUtility_SOURCES = mfrlib_utility.c
+mfrHalUtility_LDADD = libRDKMfrLib.la
+mfrHalUtility_CFLAGS = $(RDKMFRLIBS_CFLAGS)
