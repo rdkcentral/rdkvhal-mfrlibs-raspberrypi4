@@ -26,3 +26,8 @@ endif
 
 libRDKMfrLib_la_CFLAGS=$(RDKMFRLIBS_CFLAGS)
 libRDKMfrLib_la_LIBADD=$(RDKMFRLIBS_LIBS)
+
+bin_PROGRAMS = mfrUtility
+mfrUtility_SOURCES = mfrlib_utility.c
+mfrUtility_LDADD = libRDKMfrLib.la
+mfrUtility_CFLAGS = $(RDKMFRLIBS_CFLAGS)
