@@ -755,7 +755,7 @@ mfrError_t mfrSetSerializedData( mfrSerializedType_t type,  mfrSerializedData_t 
         mfrlib_log("mfrSetSerializedData not initialized\n");
         return mfrERR_NOT_INITIALIZED;
     }
-    if (!data || !isValidMfrSerializedType(param)) {
+    if (!data || !isValidMfrSerializedType(type)) {
         mfrlib_log("Invalid mfrSerializedType_t or data ptr is NULL\n");
         return mfrERR_INVALID_PARAM;
     }
