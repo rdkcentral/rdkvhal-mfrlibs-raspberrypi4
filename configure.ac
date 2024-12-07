@@ -31,18 +31,13 @@ AC_PROG_CC
 # Checks for libtool
 LT_INIT
 
-# Checks for Bluetooth library
-AC_CHECK_LIB([bluetooth], [hci_get_route], [RDKMFRLIB_LIBS="$RDKMFRLIB_LIBS -lbluetooth"], [AC_MSG_ERROR([Bluetooth library not found])])
-
 # Libs and cflags
 RDKMFRLIBS_CFLAGS="-I$PKG_CONFIG_SYSROOT_DIR/usr/include/rdk/iarmmgrs-hal \
                            -I$PKG_CONFIG_SYSROOT_DIR/usr/include/rdk/iarmbus"
 AC_SUBST(RDKMFRLIBS_CFLAGS)
 
-AC_SUBST(RDKMFRLIB_LIBS)
-
 # Checks for header files.
-AC_CHECK_HEADERS([stdio.h stdlib.h string.h])
+AC_CHECK_HEADERS([stdio.h stdlib.h string.h ctype.h unistd.h net/if.h arpa/inet.h sys/ioctl.h sys/socket.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 # check for thermal protection

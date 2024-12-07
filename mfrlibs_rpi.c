@@ -26,9 +26,6 @@
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <bluetooth/hci.h>
-#include <bluetooth/hci_lib.h>
-#include <bluetooth/bluetooth.h>
 
 #include <mfrMgr.h>
 #include <mfrTypes.h>
@@ -130,34 +127,42 @@ int getValueFromVersionFile(const char *key, char separator, char *valueOut, siz
  */
 int getBDAddress(char *bdAddress, size_t maxLen)
 {
-    int sock;
-    struct hci_dev_info di;
+    FILE *fp = NULL;
+    char buffer[MAX_BUF_LEN] = {0};
+    char *addr_start = NULL;
+    int retVal = -1;
 
-    if (!bdAddress || maxLen < 18) {
+    if (!bdAddress || maxLen < 18) { // Bluetooth address is 17 characters + null terminator
         mfrlib_log("getBDAddress invalid input.\n");
-        return -1;
+        return retVal;
     }
 
-    sock = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
-    if (sock < 0) {
-        mfrlib_log("getBDAddress socket creation failed\n");
-        return -1;
+    fp = popen("hciconfig -a | grep 'BD Address'", "r");
+    if (fp == NULL) {
+        mfrlib_log("getBDAddress popen failed\n");
+        return retVal;
     }
 
-    memset(&di, 0, sizeof(di));
-    di.dev_id = 0;
-    if (ioctl(sock, HCIGETDEVINFO, (void *)&di) < 0) {
-        mfrlib_log("getBDAddress ioctl failed\n");
-        close(sock);
-        return -1;
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        addr_start = strstr(buffer, "BD Address: ");
+        if (addr_start) {
+            addr_start += strlen("BD Address: ");
+            size_t addr_len = strcspn(addr_start, " \n");
+            if (addr_len >= maxLen) {
+                addr_len = maxLen - 1;
+            }
+            strncpy(bdAddress, addr_start, addr_len);
+            bdAddress[addr_len] = '\0';
+            retVal = 0;
+        } else {
+            mfrlib_log("getBDAddress BD Address not found in '%s' output.\n", "hciconfig -a | grep 'BD Address'");
+        }
+    } else {
+        mfrlib_log("getBDAddress fgets failed\n");
     }
 
-    close(sock);
-    snprintf(bdAddress, maxLen, "%02X:%02X:%02X:%02X:%02X:%02X",
-             di.bdaddr.b[5], di.bdaddr.b[4], di.bdaddr.b[3],
-             di.bdaddr.b[2], di.bdaddr.b[1], di.bdaddr.b[0]);
-
-    return 0;
+    pclose(fp);
+    return retVal;
 }
 
 /**
