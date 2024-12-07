@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <net/if.h>
@@ -127,12 +128,12 @@ void mfrlib_log(const char *format, ...)
 void configMFRLibLogging(void)
 {
     if (access(LOG_CONFIG_FILE, F_OK) == -1) {
-        perror("configMFRLibLogging error access F_OK '%s'.\n", LOG_CONFIG_FILE);
+        perror("configMFRLibLogging error accessing debug.ini\n");
         return;
     }
     FILE *file = fopen(LOG_CONFIG_FILE, "r");
     if (!file) {
-        perror("configMFRLibLogging error fopen '%s'.\n", LOG_CONFIG_FILE);
+        perror("configMFRLibLogging error fopen debug.ini\n");
         return;
     }
 
