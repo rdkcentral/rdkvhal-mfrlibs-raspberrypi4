@@ -983,14 +983,6 @@ WIFI_API_RESULT WIFI_GetCredentials(WIFI_DATA *pData)
     return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
 }
 
-bool isValidWIFIDATAType(WIFI_DATA_TYPE type)
-{
-    if ((type > WIFI_DATA_UNKNOWN)  && (type < WIFI_DATA_MAX)) {
-        return true;
-    }
-    return false;
-}
-
 WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
 {
     if (!isLibraryInitialized()) {
@@ -1002,7 +994,7 @@ WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
         return WIFI_API_RESULT_NULL_PARAM;
     }
 
-    if (!isValidWIFIDATAType(pData->type)) {
+    if ((pData->cSSID[0] == '\0') || (pData->cPassword[0] == '\0')) {
         return WIFI_API_RESULT_INVALID_PARAM;
     }
 
