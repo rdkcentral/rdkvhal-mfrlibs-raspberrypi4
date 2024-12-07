@@ -369,7 +369,7 @@ bool isValidMfrSerializedType(mfrSerializedType_t param) {
 #ifdef PANEL_SERIALIZATION_TYPES
         (param >= mfrSERIALIZED_TYPE_COREBOARD_SERIALNUMBER && param <= mfrSERIALIZED_TYPE_PANEL_MAX) ||
 #endif /* PANEL_SERIALIZATION_TYPES */
-        (param == mfrSERIALIZED_TYPE_SKYMODELNAME || param == mfrSERIALIZED_TYPE_DE_SERIAL_PREFIX)) {
+    ) {
         return true;
     }
     return false;
