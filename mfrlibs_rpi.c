@@ -408,7 +408,6 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
     }
 
     data->bufLen = 0;
-    data->freeBuf = mfrFreeBuffer;
 
     switch (param) {
     case mfrSERIALIZED_TYPE_MANUFACTURER:
