@@ -18,13 +18,8 @@
 */
 
 #include <stdio.h>
-#include <mfrMgr.h>
-#include <mfrTypes.h>
 #include <stdlib.h>
 #include <string.h>
-#include "mfr_wifi_types.h"
-#include "mfr_wifi_api.h"
-
 #include <ctype.h>
 #include <unistd.h>
 #include <net/if.h>
@@ -32,8 +27,12 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <bluetooth/hci.h>
-#include <bluetooth/hci_lib.h>
 #include <bluetooth/bluetooth.h>
+
+#include <mfrMgr.h>
+#include <mfrTypes.h>
+#include <mfr_wifi_types.h>
+#include <mfr_wifi_api.h>
 
 #define MAX_BUF_LEN 255
 #define MAC_ADDRESS_SIZE 32
@@ -145,15 +144,18 @@ int getBDAddress(char *bdAddress, size_t maxLen)
     }
 
     memset(&di, 0, sizeof(di));
-    di.dev_id = hci_get_route(NULL);
+    di.dev_id = 0;
     if (ioctl(sock, HCIGETDEVINFO, (void *)&di) < 0) {
         mfrlib_log("getBDAddress ioctl failed\n");
         close(sock);
         return -1;
     }
 
-    ba2str(&di.bdaddr, bdAddress);
     close(sock);
+    snprintf(bdAddress, maxLen, "%02X:%02X:%02X:%02X:%02X:%02X",
+             di.bdaddr.b[5], di.bdaddr.b[4], di.bdaddr.b[3],
+             di.bdaddr.b[2], di.bdaddr.b[1], di.bdaddr.b[0]);
+
     return 0;
 }
 
