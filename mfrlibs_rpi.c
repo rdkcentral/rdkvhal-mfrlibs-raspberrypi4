@@ -952,7 +952,7 @@ mfrError_t mfr_term(void)
     return mfrERR_NONE;
 }
 
-mfrError_t mfrWriteImage(const char *name,  const char *path, mfrImageType_t type,  mfrUpgradeStatusNotify_t notify);
+mfrError_t mfrWriteImage(const char *name,  const char *path, mfrImageType_t type,  mfrUpgradeStatusNotify_t notify)
 {
     if (!isLibraryInitialized()) {
         mfrlib_log("isLibraryInitialized not initialized\n");
