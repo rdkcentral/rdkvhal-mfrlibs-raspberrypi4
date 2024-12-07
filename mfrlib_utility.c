@@ -85,7 +85,7 @@ mfrSerializedType_t getmfrSerializedTypeFromString(char *pString)
 void showUsage(const char *progName)
 {
     printf("Usage: %s [-r serializedTypeString ]\n"
-           "\t-a: Read all the serialized data\n"
+           "\t-a: Read each type of serialized data one by one.\n"
            "\t-r serializedTypeString: Read the serialized data of the given type\n"
            "\t\t type: ", progName);
     for (mfrSerializedType_t i = mfrSERIALIZED_TYPE_MANUFACTURER; mfrSerializedTypeString[i]; i++) {
@@ -102,10 +102,8 @@ void printSerializedData(mfrSerializedType_t type)
     mfrSerializedData_t mfrSerializedData = {0};
     mfrError_t retVal = mfrGetSerializedData(type, &mfrSerializedData);
     if (retVal == mfrERR_NONE) {
-        printf("Received payload for : '%s'\n", mfrSerializedTypeString[type]);
-        printf("\tmfrSerializedData.buf    :'%s'\n", mfrSerializedData.buf);
-        printf("\tmfrSerializedData.bufLen : %d\n", mfrSerializedData.bufLen);
-        printf("\tmfrSerializedData.freeBuf: %p\n", mfrSerializedData.freeBuf);
+        printf("mfrSerializedData.buf    :'%s'\n", mfrSerializedData.buf);
+        printf("mfrSerializedData.bufLen : %d\n", mfrSerializedData.bufLen);
         if (mfrSerializedData.freeBuf) {
             mfrSerializedData.freeBuf(mfrSerializedData.buf);
         } else {
@@ -125,7 +123,6 @@ int main(int argc, char **argv) {
                     if (optarg) {
                         printSerializedData(getmfrSerializedTypeFromString(optarg));
                     } else {
-                        printf("Option -r requires an argument\n");
                         showUsage(argv[0]);
                         return -1;
                     }
