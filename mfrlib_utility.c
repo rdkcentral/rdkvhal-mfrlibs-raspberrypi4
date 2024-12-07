@@ -100,6 +100,7 @@ void showUsage(const char *progName)
 void printSerializedData(mfrSerializedType_t type)
 {
     mfrSerializedData_t mfrSerializedData = {0};
+    printf("mfr_init returned '%x'\n", mfr_init());
     mfrError_t retVal = mfrGetSerializedData(type, &mfrSerializedData);
     if (retVal == mfrERR_NONE) {
         printf("mfrSerializedData.buf    :'%s'\n", mfrSerializedData.buf);
@@ -112,6 +113,7 @@ void printSerializedData(mfrSerializedType_t type)
     } else {
         printf("mfrGetSerializedData failed for '%s', error code '%x'\n", mfrSerializedTypeString[type], retVal);
     }
+    printf("mfr_term returned '%x'\n", mfr_term());
 }
 
 int main(int argc, char **argv) {
