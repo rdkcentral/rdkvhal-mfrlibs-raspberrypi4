@@ -31,19 +31,21 @@ AC_PROG_CC
 # Checks for libtool
 LT_INIT
 
-# Libs and cflags
-RDKMFRLIB_LIBS=""
-AC_SUBST(RDKMFRLIBS_LIBS)
+# Checks for Bluetooth library
+AC_CHECK_LIB([bluetooth], [hci_get_route], [RDKMFRLIB_LIBS="$RDKMFRLIB_LIBS -lbluetooth"], [AC_MSG_ERROR([Bluetooth library not found])])
 
+# Libs and cflags
 RDKMFRLIBS_CFLAGS="-I$PKG_CONFIG_SYSROOT_DIR/usr/include/rdk/iarmmgrs-hal \
                            -I$PKG_CONFIG_SYSROOT_DIR/usr/include/rdk/iarmbus"
 AC_SUBST(RDKMFRLIBS_CFLAGS)
+
+AC_SUBST(RDKMFRLIB_LIBS)
 
 # Checks for header files.
 AC_CHECK_HEADERS([stdio.h stdlib.h string.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
-# check for termal protection
+# check for thermal protection
 AC_ARG_ENABLE([thermalprotection], [--enable-thermalprotection "Enable thermal protection"],
       [case "${enableval}" in
                yes) thermalprotection=true ;;
