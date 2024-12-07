@@ -70,7 +70,8 @@ const char* mfrSerializedTypeString[] = {
 
 mfrSerializedType_t getmfrSerializedTypeFromString(const char *pString)
 {
-    for (mfrSerializedType_t i = mfrSERIALIZED_TYPE_MANUFACTURER; mfrSerializedTypeString[i]; i++) {
+    mfrSerializedType_t i;
+    for (i = mfrSERIALIZED_TYPE_MAX; mfrSerializedTypeString[i]; i++) {
         if (strcmp(pString, mfrSerializedTypeString[i]) == 0) {
             break;
         }
