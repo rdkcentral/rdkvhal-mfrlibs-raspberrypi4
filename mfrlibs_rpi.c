@@ -27,6 +27,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <bluetooth/hci.h>
+#include <bluetooth/hci_lib.h>
 #include <bluetooth/bluetooth.h>
 
 #include <mfrMgr.h>
@@ -367,9 +368,9 @@ void mfrFreeBuffer(char *buf)
  */
 bool isValidMfrSerializedType(mfrSerializedType_t param) {
     // Check if param is within the valid range of mfrSerializedType_t
-    if ((param >= mfrSERIALIZED_TYPE_MANUFACTURER && param < mfrSERIALIZED_TYPE_MAX) ||
+    if ((param >= mfrSERIALIZED_TYPE_MANUFACTURER && param < mfrSERIALIZED_TYPE_MAX)
 #ifdef PANEL_SERIALIZATION_TYPES
-        (param >= mfrSERIALIZED_TYPE_COREBOARD_SERIALNUMBER && param <= mfrSERIALIZED_TYPE_PANEL_MAX) ||
+        || (param >= mfrSERIALIZED_TYPE_COREBOARD_SERIALNUMBER && param <= mfrSERIALIZED_TYPE_PANEL_MAX) ||
 #endif /* PANEL_SERIALIZATION_TYPES */
     ) {
         return true;
