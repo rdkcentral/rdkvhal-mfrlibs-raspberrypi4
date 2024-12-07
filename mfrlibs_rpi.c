@@ -90,7 +90,7 @@ int getValueFromVersionFile(const char *key, char separator, char *valueOut, siz
     }
 
     fp = fopen("/version.txt", "r");
-    if (fp == NULL) {
+    if (NULL == fp) {
         mfrlib_log("getValueFromVersionFile fopen failed for /version.txt\n");
         return retValue;
     }
@@ -142,7 +142,7 @@ int getBDAddress(char *bdAddress, size_t maxLen)
     }
 
     fp = popen("hciconfig -a | grep 'BD Address'", "r");
-    if (fp == NULL) {
+    if (NULL == fp) {
         mfrlib_log("getBDAddress popen failed\n");
         return retVal;
     }
@@ -261,7 +261,7 @@ int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOu
 
     if (access("/etc/device.properties", F_OK) != -1) {
         fp = fopen("/etc/device.properties", "r");
-        if (fp == NULL) {
+        if (NULL == fp) {
             mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile fopen() error.\n");
             return ret;
         }
@@ -322,7 +322,7 @@ int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t siz
 
     if (access("/proc/cpuinfo", F_OK) != -1) {
         fp = fopen("/proc/cpuinfo", "r");
-        if (fp == NULL) {
+        if (NULL == fp) {
             mfrlib_log("getValueMatchingKeyFromCPUINFO fopen() error.\n");
             return ret;
         }
@@ -408,6 +408,7 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
     }
 
     data->bufLen = 0;
+    data->freeBuf = mfrFreeBuffer;
 
     switch (param) {
     case mfrSERIALIZED_TYPE_MANUFACTURER:
@@ -419,10 +420,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
             /* retrieving tag MANUFACTURE from /etc/device.properties */
             if (getValueMatchingKeyFromDevicePropertiesFile("MANUFACTURE", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Manufacturer= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -437,10 +438,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         } else {
             if (getManufacturerOUIHexString(data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Manufacturer OUI= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getManufacturerOUIHexString failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -455,10 +456,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
             /* retrieving tag DEVICE_NAME from /etc/device.properties */
             if (getValueMatchingKeyFromDevicePropertiesFile("DEVICE_NAME", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Model Name= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -473,6 +474,7 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
             /* Add description as 'RDKV Reference Device' */
             strncpy(data->buf, defaultDescription, ((sizeof(defaultDescription) < MAX_BUF_LEN) ? sizeof(defaultDescription) : MAX_BUF_LEN));
             data->bufLen = strlen(data->buf);
+            data->freeBuf = mfrFreeBuffer;
             mfrlib_log("Description= '%s', len=%d\n", data->buf, data->bufLen);
         }
         break;
@@ -485,6 +487,7 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
             /* Add product class as 'RDKV' */
             strncpy(data->buf, defaultProductClass, ((sizeof(defaultProductClass) < MAX_BUF_LEN) ? sizeof(defaultProductClass) : MAX_BUF_LEN));
             data->bufLen = strlen(data->buf);
+            data->freeBuf = mfrFreeBuffer;
             mfrlib_log("Product Class= '%s', len=%d\n", data->buf, data->bufLen);
         }
         break;
@@ -498,10 +501,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
             /* retrieving tag SERIAL_NUMBER from /etc/device.properties */
             if (getValueMatchingKeyFromCPUINFO("Serial", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Serial Number= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -516,10 +519,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
             /* retrieving tag REVISION from /etc/device.properties */
             if (getValueMatchingKeyFromCPUINFO("Revision", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Hardware Version= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -535,10 +538,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         } else {
             if (getInterfaceMACString("eth0", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Device MAC= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getInterfaceMACString failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -552,10 +555,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         } else {
             if (getInterfaceMACString("wlan0", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("WiFi MAC= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getInterfaceMACString failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -570,6 +573,7 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         } else {
             strncpy(data->buf, defaultSoftwareVersion, ((sizeof(defaultSoftwareVersion) < MAX_BUF_LEN) ? sizeof(defaultSoftwareVersion) : MAX_BUF_LEN));
             data->bufLen = strlen(data->buf);
+            data->freeBuf = mfrFreeBuffer;
             mfrlib_log("Software Version= '%s', len=%d\n", data->buf, data->bufLen);
         }
         break;
@@ -584,16 +588,15 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
             if (getValueMatchingKeyFromDevicePropertiesFile("MOCA_INTERFACE", mocaInterface, sizeof(mocaInterface)) == 0) {
                 if (getInterfaceMACString(mocaInterface, data->buf, MAX_BUF_LEN) == 0) {
                     data->bufLen = strlen(data->buf);
+                    data->freeBuf = mfrFreeBuffer;
                     mfrlib_log("MOCA MAC= '%s', len=%d\n", data->buf, data->bufLen);
                 } else {
                     mfrFreeBuffer(data->buf);
-                    data->freeBuf = NULL;
                     mfrlib_log("getInterfaceMACString failed, return mfrERR_FLASH_READ_FAILED.\n");
                     ret = mfrERR_FLASH_READ_FAILED;
                 }
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -607,10 +610,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         } else {
             if (getBDAddress(data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Bluetooth MAC= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getBDAddress failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -626,10 +629,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         } else {
             if (getValueMatchingKeyFromCPUINFO("Revision", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("HWID= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -644,10 +647,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         } else {
             if (getValueMatchingKeyFromCPUINFO("Hardware", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("SOC ID= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -662,10 +665,10 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         } else {
             if (getValueFromVersionFile("imagename", ':', data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
+                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Image Name= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 mfrFreeBuffer(data->buf);
-                data->freeBuf = NULL;
                 mfrlib_log("getValueFromVersionFile failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -697,7 +700,7 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
 
 WIFI_API_RESULT WIFI_GetCredentials(WIFI_DATA *pData)
 {
-   if (pData == NULL) {
+   if (NULL == pData) {
         return WIFI_API_RESULT_NULL_PARAM;
    }
 
@@ -706,7 +709,7 @@ WIFI_API_RESULT WIFI_GetCredentials(WIFI_DATA *pData)
 
 WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
 {
-    if (pData == NULL) {
+    if (NULL == pData) {
         return WIFI_API_RESULT_NULL_PARAM;
     }
 
