@@ -99,8 +99,12 @@ int getValueFromVersionFile(const char *key, char separator, char *valueOut, siz
         if (strncmp(line, key, keyLen) == 0 && line[keyLen] == separator) {
             char *value = line + keyLen + 1;
             while (*value == ' ' && *value != '\0') value++;
-            strncpy(valueOut, value, maxLen - 1);
-            valueOut[maxLen - 1] = '\0'; // Ensure null-termination
+            int i = 0;
+            while (value[i] != '\0' && value[i] != '\n' && value[i] != '\r' && i < maxLen - 1) {
+                valueOut[i] = value[i];
+                i++;
+            }
+            valueOut[i] = '\0';
             found = 1;
             retValue = 0;
             break;
@@ -278,8 +282,12 @@ int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOu
             char *value = strchr(buffer, '=');
             if (value) {
                 value++;
-                strncpy(valueOut, value, size - 1);
-                valueOut[size - 1] = '\0';
+                int i = 0;
+                while (value[i] != '\0' && value[i] != '\n' && value[i] != '\r' && i < size - 1) {
+                    valueOut[i] = value[i];
+                    i++;
+                }
+                valueOut[i] = '\0';
                 ret = 0;
             }
         }
@@ -338,8 +346,12 @@ int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t siz
                 while ((*value == ' ') && (*value != '\0')) {
                     value++;
                 }
-                strncpy(valueOut, value, size - 1);
-                valueOut[size - 1] = '\0';
+                int i = 0;
+                while (value[i] != '\0' && value[i] != '\n' && value[i] != '\r' && i < size - 1) {
+                    valueOut[i] = value[i];
+                    i++;
+                }
+                valueOut[i] = '\0';
                 ret = 0;
             }
         }

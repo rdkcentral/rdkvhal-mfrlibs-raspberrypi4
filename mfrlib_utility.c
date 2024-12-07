@@ -99,12 +99,14 @@ void printSerializedData(mfrSerializedType_t type)
     mfrSerializedData_t mfrSerializedData = {0};
     mfrError_t retVal = mfrGetSerializedData(type, &mfrSerializedData);
     if (retVal == mfrERR_NONE) {
-        printf("Received payload for %s:\n", mfrSerializedTypeString[type]);
-        printf("mfrSerializedData.buf: '%s'\n", mfrSerializedData.buf);
-        printf("mfrSerializedData.bufLen: %d\n", mfrSerializedData.bufLen);
-        printf("mfrSerializedData.freeBuf: %p\n", mfrSerializedData.freeBuf);
+        printf("Received payload for : '%s'\n", mfrSerializedTypeString[type]);
+        printf("\tmfrSerializedData.buf    :'%s'\n", mfrSerializedData.buf);
+        printf("\tmfrSerializedData.bufLen : %d\n", mfrSerializedData.bufLen);
+        printf("\tmfrSerializedData.freeBuf: %p\n", mfrSerializedData.freeBuf);
         if (mfrSerializedData.freeBuf) {
             mfrSerializedData.freeBuf(mfrSerializedData.buf);
+        } else {
+            printf("mfrSerializedData.freeBuf is NULL\n");
         }
     } else {
         printf("mfrGetSerializedData failed for '%s', error code '%d'\n", mfrSerializedTypeString[type], retVal);
@@ -122,6 +124,7 @@ int main(int argc, char **argv) {
                 case 'a':
                     for (mfrSerializedType_t i = mfrSERIALIZED_TYPE_MANUFACTURER; mfrSerializedTypeString[i]; i++) {
                         printSerializedData(i);
+                        printf("\n");
                     }
                     break;
                 default:
