@@ -32,18 +32,15 @@ AC_PROG_CC
 LT_INIT
 
 # Libs and cflags
-RDKMFRLIB_LIBS=""
-AC_SUBST(RDKMFRLIBS_LIBS)
-
 RDKMFRLIBS_CFLAGS="-I$PKG_CONFIG_SYSROOT_DIR/usr/include/rdk/iarmmgrs-hal \
                            -I$PKG_CONFIG_SYSROOT_DIR/usr/include/rdk/iarmbus"
 AC_SUBST(RDKMFRLIBS_CFLAGS)
 
 # Checks for header files.
-AC_CHECK_HEADERS([stdio.h stdlib.h string.h])
+AC_CHECK_HEADERS([stdio.h stdlib.h string.h ctype.h unistd.h net/if.h arpa/inet.h sys/ioctl.h sys/socket.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
-# check for termal protection
+# check for thermal protection
 AC_ARG_ENABLE([thermalprotection], [--enable-thermalprotection "Enable thermal protection"],
       [case "${enableval}" in
                yes) thermalprotection=true ;;
@@ -51,6 +48,14 @@ AC_ARG_ENABLE([thermalprotection], [--enable-thermalprotection "Enable thermal p
                *) AC_MSG_ERROR([bad value ${enableval} for thermal protection]) ;;
        esac], [thermalprotection=false])
 AM_CONDITIONAL([THERMAL_PROTECTION_ENABLED], [test x$thermalprotection = xtrue])
+
+AC_ARG_ENABLE([single-instance-lock],
+    AS_HELP_STRING([--enable-single-instance-lock], [Enable single instance lock mechanism]),
+    [enable_single_instance_lock=$enableval], [enable_single_instance_lock=no])
+
+if test "x$enable_single_instance_lock" = "xyes"; then
+    AC_DEFINE([ENABLE_SINGLE_INSTANCE_LOCK], [1], [Enable single instance lock mechanism])
+fi
 
 # Checks for library functions.
 AC_FUNC_MALLOC
