@@ -42,7 +42,7 @@
 #define LOG_CONFIG_FILE "/etc/debug.ini"
 
 #define BOOT_CONFIG_FILE "/boot/config.txt"
-#define BOOT_CONFIG_BACKUP_FILE "/opt/boot-config.txt.bak"
+#define BOOT_CONFIG_BACKUP_FILE "/boot/config.txt.bak"
 
 const char defaultDescription[] = "RaspberryPi RDKV Reference Device";
 const char defaultProductClass[] = "RDKV";
@@ -958,8 +958,7 @@ bool isValidActLEDParam(const char *param)
 		"dtparam=act_led_trigger=none",
 		"dtparam=act_led_trigger=default-on",
 		"dtparam=act_led_trigger=heartbeat",
-		"dtparam=act_led_trigger=mmc0",
-		"dtparam=act_led_activelow=on"
+		"dtparam=act_led_trigger=mmc0"
 	};
 	size_t numValidParams = sizeof(validParams) / sizeof(validParams[0]);
 	for (size_t i = 0; i < numValidParams; i++) {
@@ -1122,7 +1121,7 @@ mfrError_t mfrSetBootloaderPattern(mfrBlPattern_t pattern)
             break;
         case mfrBL_PATTERN_SILENT:
             // Silent boot loader pattern - keep the LED off.
-            returnStatus = updateBootConfigFile("dtparam=act_led_trigger=off");
+            returnStatus = updateBootConfigFile("dtparam=act_led_trigger=none");
             break;
         case mfrBL_PATTERN_SILENT_LED_ON:
             // silent LED on pattern - enable only LED and disable LOGO during this boot up
