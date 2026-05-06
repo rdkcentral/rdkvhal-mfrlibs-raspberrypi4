@@ -17,8 +17,10 @@
  * limitations under the License.
 */
 
+#define _GNU_SOURCE
 #include <ctype.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -38,6 +40,9 @@
 #define MAX_BUF_LEN 255
 #define MAC_ADDRESS_SIZE 32
 #define LOG_CONFIG_FILE "/etc/debug.ini"
+
+#define BOOT_CONFIG_FILE "/boot/config.txt"
+#define BOOT_CONFIG_BACKUP_FILE "/opt/boot-config.txt.bak"
 
 const char defaultDescription[] = "RaspberryPi RDKV Reference Device";
 const char defaultProductClass[] = "RDKV";
@@ -481,7 +486,7 @@ void mfrFreeBuffer(char *buf)
  * @brief Check if the given mfrSerializedType_t is valid
  * @param param mfrSerializedType_t
  * @return true if valid, false otherwise
- * @note Refer https://github.com/rdk-e/iarmmgrs/blob/main/mfr/include/mfrTypes.h#L205
+ * @note Refer https://github.com/rdkcentral/iarmmgrs/blob/main/mfr/include/mfrTypes.h
  */
 bool isValidMfrSerializedType(mfrSerializedType_t param) {
     // Check if param is within the valid range of mfrSerializedType_t
@@ -495,6 +500,28 @@ bool isValidMfrSerializedType(mfrSerializedType_t param) {
     return false;
 }
 
+/**
+ * @brief Retrieves serialized Read-Only data from device
+ *
+ *
+ * @param [in] type :  specifies the serialized data type to be read. @see mfrSerializedType_t
+ * @param [in] data :  serialized data for the specific type requested. (buffer location, length, and func to free the buffer). @see mfrSerializedData_t
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_NOT_INITIALIZED          - Module is not initialised
+ * @retval mfrERR_INVALID_PARAM            - Parameter passed to this function is invalid
+ * @retval mfrERR_MEMORY_EXHAUSTED         - memory allocation failure
+ * @retval mfrERR_FAILED_CRC_CHECK         - CRC check failed
+ * @retval mfrERR_FLASH_READ_FAILED        - Flash read failed
+ *
+ * @note The serialized data is returned as a byte stream. It is upto the  application to deserialize and make sense of the data returned.
+ *  Even if the serialized data returned is "string", the buffer is not required to contain the null-terminator
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED.
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *data)
 {
     char cmd[MAX_BUF_LEN] = {0};
@@ -802,6 +829,26 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
     return ret;
 }
 
+/**
+ * @brief Sets the read write Serialization data on device
+ *
+ * @param [in] type :  specifies the serialized data type to write. @see mfrSerializedType_t
+ * @param [in] data :  serialized data to set for the specific type requested. (buffer location, length, and func to free the buffer). @see mfrSerializedData_t
+ *
+ * @return mfrError_t                       - Status
+ * @retval mfrERR_NONE                      - Success
+ * @retval mfrERR_NOT_INITIALIZED           - Module is not initialised
+ * @retval mfrERR_INVALID_PARAM             - Parameter passed to this function is invalid
+ * @retval mfrERR_MEMORY_EXHAUSTED          - memory allocation failure
+ * @retval mfrERR_FAILED_CRC_CHECK          - CRC check failed
+ * @retval mfrERR_WRITE_FLASH_FAILED        - Flash write failed
+ * @retval mfrERR_FLASH_READ_FAILED        - Flash read failed
+ * @retval mfrERR_FLASH_VERIFY_FAILED       - Flash verification failed
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED.
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfrSetSerializedData( mfrSerializedType_t type,  mfrSerializedData_t *data)
 {
     if (!isLibraryInitialized()) {
@@ -817,6 +864,19 @@ mfrError_t mfrSetSerializedData( mfrSerializedType_t type,  mfrSerializedData_t 
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
+/**
+ * @brief Deletes the PDRI image if it is present
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_NOT_INITIALIZED          - Module is not initialised
+ * @retval mfrERR_WRITE_FLASH_FAILED       - Flash write failed
+ * @retval mfrERR_FLASH_VERIFY_FAILED      - Flash verification failed
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED.
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfrDeletePDRI()
 {
     if (!isLibraryInitialized()) {
@@ -826,6 +886,19 @@ mfrError_t mfrDeletePDRI()
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
+/**
+ * @brief Deletes the platform images. Deletes the main image from primary and secondary bank
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_NOT_INITIALIZED          - Module is not initialised
+ * @retval mfrERR_WRITE_FLASH_FAILED       - Flash write failed
+ * @retval mfrERR_FLASH_VERIFY_FAILED      - Flash verification failed
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED.
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfrScrubAllBanks()
 {
     if (!isLibraryInitialized()) {
@@ -843,8 +916,195 @@ bool isValidMfrBLPattern(mfrBlPattern_t pattern)
     return false;
 }
 
+static int copyFile(const char *src, const char *dst)
+{
+    int in = open(src, O_RDONLY);
+    if (in == -1) return -1;
+
+    struct stat st;
+    if (fstat(in, &st) == -1) { close(in); return -1; }
+
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode);
+    if (out == -1) { close(in); return -1; }
+
+    off_t remaining = st.st_size;
+    loff_t off_in = 0, off_out = 0;
+    int ret = 0;
+    while (remaining > 0) {
+        ssize_t copied = copy_file_range(in, &off_in, out, &off_out, (size_t)remaining, 0);
+        if (copied == -1) { ret = -1; break; }
+        remaining -= copied;
+    }
+
+    close(in);
+    close(out);
+    return ret;
+}
+
+/*
+ * Valid values for act_led_dtparam:
+ *
+ *  Parameter                            Description
+ *  -----------------------------------  ----------------------------
+ *  dtparam=act_led_trigger=none         Disable the LED (stays off)
+ *  dtparam=act_led_trigger=default-on   Always on
+ *  dtparam=act_led_trigger=heartbeat    Heartbeat blink
+ *  dtparam=act_led_trigger=mmc0         SD card activity (default)
+ *  dtparam=act_led_activelow=on         Invert logic (active-low)
+ */
+bool isValidActLEDParam(const char *param)
+{
+	const char *validParams[] = {
+		"dtparam=act_led_trigger=none",
+		"dtparam=act_led_trigger=default-on",
+		"dtparam=act_led_trigger=heartbeat",
+		"dtparam=act_led_trigger=mmc0",
+		"dtparam=act_led_activelow=on"
+	};
+	size_t numValidParams = sizeof(validParams) / sizeof(validParams[0]);
+	for (size_t i = 0; i < numValidParams; i++) {
+		if (strcmp(param, validParams[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+mfrError_t updateBootConfigFile(const char *act_led_dtparam)
+{
+    FILE *fp = NULL;
+    int found = 0;
+    int retVal = mfrERR_NONE;
+    char *fileContents = NULL;
+    char *line = NULL;
+    size_t lineLen = 0;
+    ssize_t nread;
+    size_t newSize = 0;
+    int written = 0;
+    const char *key = "dtparam=act_led_trigger=";
+
+    if (!act_led_dtparam || !isValidActLEDParam(act_led_dtparam)) {
+        mfrlib_log("updateBootConfigFile invalid input or unsupported parameter\n");
+        return mfrERR_INVALID_PARAM;
+    }
+
+    // Open and exclusively lock the file first so that backup, modification,
+    // and any restore all happen atomically with respect to other flock() callers.
+    // flock() is advisory; all writers must cooperate by also calling flock().
+    fp = fopen(BOOT_CONFIG_FILE, "r+");
+    if (NULL == fp) {
+        mfrlib_log("updateBootConfigFile fopen() error for %s\n", BOOT_CONFIG_FILE);
+        return mfrERR_WRITE_FLASH_FAILED;
+    }
+    if (flock(fileno(fp), LOCK_EX) != 0) {
+        mfrlib_log("updateBootConfigFile flock() error for %s\n", BOOT_CONFIG_FILE);
+        fclose(fp);
+        return mfrERR_WRITE_FLASH_FAILED;
+    }
+
+    // Back up the original file to /opt while holding the lock.
+    if (copyFile(BOOT_CONFIG_FILE, BOOT_CONFIG_BACKUP_FILE) != 0) {
+        mfrlib_log("updateBootConfigFile failed to create backup at %s\n", BOOT_CONFIG_BACKUP_FILE);
+        fclose(fp);
+        return mfrERR_WRITE_FLASH_FAILED;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        remove(BOOT_CONFIG_BACKUP_FILE);
+        return mfrERR_WRITE_FLASH_FAILED;
+    }
+    long fsize = ftell(fp);
+    if (fsize < 0) {
+        fclose(fp);
+        remove(BOOT_CONFIG_BACKUP_FILE);
+        return mfrERR_WRITE_FLASH_FAILED;
+    }
+    rewind(fp);
+
+    // Allocate buffer large enough for original content plus a possible new line.
+    fileContents = (char *)malloc((size_t)fsize + MAX_BUF_LEN + 2);
+    if (!fileContents) {
+        fclose(fp);
+        remove(BOOT_CONFIG_BACKUP_FILE);
+        return mfrERR_WRITE_FLASH_FAILED;
+    }
+
+    // Read line by line; replace dtparam=act_led_trigger= if found, else append later.
+    while ((nread = getline(&line, &lineLen, fp)) != -1) {
+        if (!found && strncmp(line, key, strlen(key)) == 0) {
+            written = snprintf(fileContents + newSize, MAX_BUF_LEN, "%s\n", act_led_dtparam);
+            if (written < 0 || written >= MAX_BUF_LEN) {
+                retVal = mfrERR_WRITE_FLASH_FAILED;
+                goto cleanup;
+            }
+            newSize += (size_t)written;
+            found = 1;
+        } else {
+            memcpy(fileContents + newSize, line, (size_t)nread);
+            newSize += (size_t)nread;
+        }
+    }
+
+    if (!found) {
+        // Append the dtparam line at the end of the file.
+        written = snprintf(fileContents + newSize, MAX_BUF_LEN, "%s\n", act_led_dtparam);
+        if (written < 0 || written >= MAX_BUF_LEN) {
+            retVal = mfrERR_WRITE_FLASH_FAILED;
+            goto cleanup;
+        }
+        newSize += (size_t)written;
+    }
+
+    rewind(fp);
+    if (fwrite(fileContents, 1, newSize, fp) != newSize) {
+        mfrlib_log("updateBootConfigFile fwrite() error; restoring from backup\n");
+        retVal = mfrERR_WRITE_FLASH_FAILED;
+    } else if (ftruncate(fileno(fp), (off_t)newSize) != 0) {
+        mfrlib_log("updateBootConfigFile ftruncate() error; restoring from backup\n");
+        retVal = mfrERR_WRITE_FLASH_FAILED;
+    }
+
+    // On any write failure, restore from the backup file while still holding the lock.
+    if (retVal != mfrERR_NONE) {
+        if (copyFile(BOOT_CONFIG_BACKUP_FILE, BOOT_CONFIG_FILE) != 0) {
+            mfrlib_log("updateBootConfigFile restore failed; %s may be corrupted\n", BOOT_CONFIG_FILE);
+        }
+    }
+
+cleanup:
+    free(line);
+    free(fileContents);
+    if (fp) {
+        fclose(fp); // releases flock
+    }
+    remove(BOOT_CONFIG_BACKUP_FILE);
+    sync();
+    return retVal;
+}
+
+/**
+ * @brief Sets bootloader LED pattern
+ *
+ * This function stores the bootup pattern in the persistance storage for bootloader to read
+ * and control the front panel LED and/or TV backlight sequence on bootup
+ *
+ * @param [in] pattern : options are defined by enum mfrBlPattern_t. @see mfrBlPattern_t
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_NOT_INITIALIZED          - Module is not initialised
+ * @retval mfrERR_INVALID_PARAM            - Parameter passed to this function is invalid
+ * @retval mfrERR_WRITE_FLASH_FAILED       - Flash write failed
+ * @retval mfrERR_FLASH_VERIFY_FAILED      - Flash verification failed
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED.
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfrSetBootloaderPattern(mfrBlPattern_t pattern)
 {
+    mfrError_t returnStatus = mfrERR_NONE;
     if (!isLibraryInitialized()) {
         mfrlib_log("isLibraryInitialized not initialized\n");
         return mfrERR_NOT_INITIALIZED;
@@ -855,9 +1115,47 @@ mfrError_t mfrSetBootloaderPattern(mfrBlPattern_t pattern)
         return mfrERR_INVALID_PARAM;
     }
 
-    return mfrERR_OPERATION_NOT_SUPPORTED;
+    switch (pattern) {
+        case mfrBL_PATTERN_NORMAL:
+            // Normal boot loader pattern - enable both LOGO as well LED ON during boot up.
+            returnStatus = updateBootConfigFile("dtparam=act_led_trigger=default-on");
+            break;
+        case mfrBL_PATTERN_SILENT:
+            // Silent boot loader pattern - keep the LED off.
+            returnStatus = updateBootConfigFile("dtparam=act_led_trigger=off");
+            break;
+        case mfrBL_PATTERN_SILENT_LED_ON:
+            // silent LED on pattern - enable only LED and disable LOGO during this boot up
+            returnStatus = updateBootConfigFile("dtparam=act_led_trigger=default-on");
+            break;
+        case mfrBL_PATTERN_LOGO_DISABLED:
+            // Logo disabled pattern - keep the LOGO off
+            mfrlib_log("mfrSetBootloaderPattern Logo disabled pattern\n");
+            break;
+        default:
+            mfrlib_log("mfrSetBootloaderPattern Unsupported mfrBlPattern_t\n");
+            returnStatus = mfrERR_OPERATION_NOT_SUPPORTED;
+    }
+
+    return returnStatus;
 }
 
+/**
+ * @brief API to update Primary Splash screen Image and to override the default the Splash screen image
+ *
+ * @param [in] path : char pointer which holds the path of input bootloader OSD image.
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_NOT_INITIALIZED          - Module is not initialised
+ * @retval mfrERR_INVALID_PARAM            - Parameter passed to this function is invalid
+ * @retval mfrERR_IMAGE_FILE_OPEN_FAILED   - Failed to open the downloaded splash screen file
+ * @retval mfrERR_MEMORY_EXHAUSTED         - memory allocation failure
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED.
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfrSetBlSplashScreen(const char *path)
 {
     if (!isLibraryInitialized()) {
@@ -872,6 +1170,20 @@ mfrError_t mfrSetBlSplashScreen(const char *path)
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
+/**
+ * @brief API to clear the primary Splash screen Image and to make
+ * use of default Splash screen image
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_NOT_INITIALIZED          - Module is not initialised
+ * @retval mfrERR_IMAGE_FILE_OPEN_FAILED   - Failed to open the downloaded splash screen file
+ * @retval mfrERR_MEMORY_EXHAUSTED         - memory allocation failure
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED.
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfrClearBlSplashScreen(void)
 {
     if (!isLibraryInitialized()) {
@@ -882,6 +1194,13 @@ mfrError_t mfrClearBlSplashScreen(void)
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 
+/**
+* @brief API to retrive the secure time from TEE
+*
+* @param [in] params : unit32 timeptr to get the UTC time in seconds
+*
+* @return Error Code:  Return mfrERR_NONE if operation is successful, mfrERR_GENERAL if it fails
+*/
 mfrError_t mfrGetSecureTime(uint32_t *timeptr)
 {
     if (!isLibraryInitialized()) {
@@ -893,10 +1212,20 @@ mfrError_t mfrGetSecureTime(uint32_t *timeptr)
         mfrlib_log("mfrGetSecureTime invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
-
+#if USE_HEADER_SPECIFIC_RETURN_STATUS
+    return mfrERR_GENERAL;
+#else /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
     return mfrERR_OPERATION_NOT_SUPPORTED;
+#endif /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
 }
 
+/**
+* @brief API to set the secure time from TEE
+*
+* @param [in] params : unit32 timeptr to set the UTC time in seconds
+*
+* @return Error Code:  Return mfrERR_NONE if operation is successful, mfrERR_GENERAL if it fails
+*/
 mfrError_t mfrSetSecureTime(uint32_t *timeptr)
 {
     if (!isLibraryInitialized()) {
@@ -908,10 +1237,25 @@ mfrError_t mfrSetSecureTime(uint32_t *timeptr)
         mfrlib_log("mfrSetSecureTime invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
-
+#if USE_HEADER_SPECIFIC_RETURN_STATUS
+    return mfrERR_GENERAL;
+#else /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
     return mfrERR_OPERATION_NOT_SUPPORTED;
+#endif /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
 }
 
+/**
+ * @brief API to set the fsr flag into the emmc raw area
+ *
+ * @param [in] params : uint16_t fsrflag to set the FSR flag
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_NOT_INITIALIZED          - Module is not initialised
+ * @retval mfrERR_INVALID_PARAM            - Parameter passed to this function is invalid
+ * @return Error Code:  Return mfrERR_NONE if operation is successful, mfrERR_GENERAL if it fails
+ *
+ **/
 mfrError_t mfrSetFSRflag(uint16_t *newFsrFlag)
 {
     if (!isLibraryInitialized()) {
@@ -923,10 +1267,20 @@ mfrError_t mfrSetFSRflag(uint16_t *newFsrFlag)
         mfrlib_log("mfrSetFSRflag invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
-
+#if USE_HEADER_SPECIFIC_RETURN_STATUS
+    return mfrERR_GENERAL;
+#else /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
     return mfrERR_OPERATION_NOT_SUPPORTED;
+#endif /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
 }
 
+/**
+* @brief API to get the fsr flag from emmc
+*
+* @param [in] params : unit32 fsrflag to get the FSR flag
+*
+* @return Error Code:  Return mfrERR_NONE if operation is successful, mfrERR_GENERAL if it fails
+*/
 mfrError_t mfrGetFSRflag(uint16_t *newFsrFlag)
 {
     if (!isLibraryInitialized()) {
@@ -938,8 +1292,11 @@ mfrError_t mfrGetFSRflag(uint16_t *newFsrFlag)
         mfrlib_log("mfrGetFSRflag invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
-
+#if USE_HEADER_SPECIFIC_RETURN_STATUS
+    return mfrERR_GENERAL;
+#else /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
     return mfrERR_OPERATION_NOT_SUPPORTED;
+#endif /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
 }
 
 bool isValidMfrImageType(mfrImageType_t type) {
@@ -949,6 +1306,20 @@ bool isValidMfrImageType(mfrImageType_t type) {
     return false;
 }
 
+/**
+ * @brief Initializes the MFR library
+ *
+ * This function will initialize all the respective internal components responsible for MFR functionalities.
+ * This API need to be called before any other APIs in this module
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_ALREADY_INITIALIZED      - Module is already initialised
+ * @retval mfrERR_MEMORY_EXHAUSTED         - memory allocation failure
+ *
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfr_init(void)
 {
     configMFRLibLogging();
@@ -969,6 +1340,18 @@ mfrError_t mfr_init(void)
     return mfrERR_NONE;
 }
 
+/**
+ * @brief Uninitializes the MFR library
+ *
+ * This function will uninitialize all the respective internal components responsible for MFR functionalities.
+ *
+ * @return mfrError_t                      - Status
+ * @retval mfrERR_NONE                     - Success
+ * @retval mfrERR_NOT_INITIALIZED          - Module is not initialised
+ *
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfr_term(void)
 {
     if (!isInitialized) {
@@ -987,6 +1370,54 @@ mfrError_t mfr_term(void)
     return mfrERR_NONE;
 }
 
+/**
+ * @brief Writes the image into flash
+ *
+ *    The process should follow these major steps:
+ *    1) Verify the validity of the image and flash
+ *    2) Update boot params and switch banks to prepare for a reboot event
+ *    3) All upgrades should be done in the alternate bank. The current bank should not be disturbed
+ *
+ *    State Transition:
+ *    0) Before the API is invoked, the Upgrade process should be in PROGRESS_NOT_STARTED state
+ *    1) After the API returns with success, the Upgrade process moves to PROGRESS_STARTED state
+ *    2) After the API returns with error,   the Upgrade process stays in PROGRESS_NOT_STARTED state. Notify function will not be invoked
+ *    3) The notify function is called at regular interval with process = PROGRESS_STARTED
+ *    4) The last invocation of notify function should have either progress = PROGRESS_COMPLETED or progress = PROGRESS_ABORTED with error code set
+ *
+ *  @note mfrWriteImage() should work without any issue when device transition to DEEPSLEEP state and Wakeup. During DEEPSLEEP state processor will
+ * cache all the pc and stack state and will enter to low power state. On wakeup system will use the saved pc and stack and resume from the same point.
+ *
+ * @param [in] name :  the filename of the image file
+ * @param [in] path :  the path of the image file in the file system
+ * @param [in] type :  the type (format, signature type) of the image.  This can dictate the handling of the image within the MFR library. @see mfrImageType_t
+ * @param[in] notify: function to provide status of the image flashing process.  @see mfrUpgradeStatusNotify_t
+ *
+ *
+ * @return mfrError_t                              - Status
+ *
+ * @retval mfrERR_NONE                             - Success
+ * @retval mfrERR_NOT_INITIALIZED                  - Module is not initialised
+ * @retval mfrERR_INVALID_PARAM                    - Parameter passed to this function is invalid
+ * @retval mfrERR_MEMORY_EXHAUSTED                 - memory allocation failure
+ * @retval mfrERR_FAILED_CRC_CHECK                 - CRC is failed
+ * @retval mfrERR_WRITE_FLASH_FAILED               - Flash write failed
+ * @retval mfrERR_FLASH_VERIFY_FAILED              - Flash verification failed
+ * @retval mfrERR_BAD_IMAGE_HEADER                 - Image header is corrupted
+ * @retval mfrERR_IMPROPER_SIGNATURE               - Image signature is invalid
+ * @retval mfrERR_IMAGE_TOO_BIG                    - Image size is more than allocated maximum
+ * @retval mfrERR_FAILED_INVALID_SIGNING_TIME      - Image signing time invalid
+ * @retval mfrERR_FAILED_IMAGE_SVN_OLDER           - software version number is older than existing image
+ * @retval mfrERR_FAILED_SAME_DRI_CODE_VERSION     - DRI code version is same
+ * @retval mfrERR_FAILED_SAME_PCI_CODE_VERSION     - PCI code version is same
+ * @retval mfrERR_IMAGE_FILE_OPEN_FAILED           - Not able to open the input image file
+ * @retval mfrERR_GET_FLASHED_IMAGE_DETAILS_FAILED - Not able to get the current image version details
+ *
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED. .
+ * @warning  This API is Not thread safe
+ *
+ */
 mfrError_t mfrWriteImage(const char *name,  const char *path, mfrImageType_t type,  mfrUpgradeStatusNotify_t notify)
 {
     if (!isLibraryInitialized()) {
@@ -1004,11 +1435,28 @@ mfrError_t mfrWriteImage(const char *name,  const char *path, mfrImageType_t typ
 
 /****************************** MFR WIFI APIs ********************************/
 
+/**
+ * @brief Retrieves the saved SSID name, password, and security mode from the MFR persistence
+ *
+ * @param pData [out] : out parameter to get the saved wifi credentials. @see WIFI_DATA
+ *
+ * @return    WIFI_API_RESULT                            - Status
+ * @retval    WIFI_API_RESULT_SUCCESS                    - Success
+ * @retval    WIFI_API_RESULT_NOT_INITIALIZED            - Not initialized
+ * @retval    WIFI_API_RESULT_OPERATION_NOT_SUPPORTED    - Operation not supported
+ * @retval    WIFI_API_RESULT_NULL_PARAM                 - Null param
+ * @retval    WIFI_API_RESULT_READ_WRITE_FAILED          - flash operation failed
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return WIFI_API_RESULT_NOT_INITIALIZED.
+ * @warning  This API is NOT thread safe. Caller shall handle the concurrency
+ * @see  WIFI_SetCredentials()
+ *
+ */
 WIFI_API_RESULT WIFI_GetCredentials(WIFI_DATA *pData)
 {
     if (!isLibraryInitialized()) {
         mfrlib_log("isLibraryInitialized not initialized\n");
-        return mfrERR_NOT_INITIALIZED;
+        return WIFI_API_RESULT_NOT_INITIALIZED;
     }
 
     if (NULL == pData) {
@@ -1018,11 +1466,29 @@ WIFI_API_RESULT WIFI_GetCredentials(WIFI_DATA *pData)
     return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
 }
 
+/**
+ * @brief Sets wifi ssid name, password and the security mode in the MFR persistance storage
+ *
+ * @param pData [in] : Sets the ssid credentials. @see WIFI_DATA
+ *
+ * @return    WIFI_API_RESULT                            - Status
+ * @retval    WIFI_API_RESULT_SUCCESS                    - Success
+ * @retval    WIFI_API_RESULT_NOT_INITIALIZED            - Not initialized
+ * @retval    WIFI_API_RESULT_OPERATION_NOT_SUPPORTED    - Operation not supported
+ * @retval    WIFI_API_RESULT_NULL_PARAM                 - Null param
+ * @retval    WIFI_API_RESULT_INVALID_PARAM              - Invalid param
+ * @retval    WIFI_API_RESULT_READ_WRITE_FAILED          - flash operation failed
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return WIFI_API_RESULT_NOT_INITIALIZED.
+ * @warning  This API is NOT thread safe. Caller shall handle the concurrency
+ * @see  WIFI_GetCredentials()
+ *
+ */
 WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
 {
     if (!isLibraryInitialized()) {
         mfrlib_log("isLibraryInitialized not initialized\n");
-        return mfrERR_NOT_INITIALIZED;
+        return WIFI_API_RESULT_NOT_INITIALIZED;
     }
 
     if (NULL == pData) {
@@ -1036,11 +1502,24 @@ WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
     return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
 }
 
+/**
+ * @brief Clears the wifi credentials saved in the  MFR persistance storage @see WIFI_DATA
+ *
+ * @return    WIFI_API_RESULT                     - Status
+ * @retval    WIFI_API_RESULT_SUCCESS             - Success
+ * @retval    WIFI_API_RESULT_NOT_INITIALIZED     - Not initialized
+ * @retval    WIFI_API_RESULT_OPERATION_NOT_SUPPORTED    - Operation not supported
+ * @retval    WIFI_API_RESULT_READ_WRITE_FAILED   - flash operation failed
+ *
+ * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return WIFI_API_RESULT_NOT_INITIALIZED.
+ * @warning  This API is NOT thread safe. Caller shall handle the concurrency
+ *
+ */
 WIFI_API_RESULT WIFI_EraseAllData(void)
 {
     if (!isLibraryInitialized()) {
         mfrlib_log("isLibraryInitialized not initialized\n");
-        return mfrERR_NOT_INITIALIZED;
+        return WIFI_API_RESULT_NOT_INITIALIZED;
     }
 
     return WIFI_API_RESULT_OPERATION_NOT_SUPPORTED;
