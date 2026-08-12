@@ -172,7 +172,7 @@ void configMFRLibLogging(void)
  * @brief Atomically creates the file if it does not exist.
  * @return 0 if created, 1 if it already existed, -1 on error.
  */
-int createFirstUseDateFileIfNotExists(void)
+static int createFirstUseDateFileIfNotExists(void)
 {
     // O_CREAT | O_EXCL ensures creation fails if the file already exists
     int fd = open(FIRST_USE_DATE_FILE, O_WRONLY | O_CREAT | O_EXCL, 0644);
@@ -1042,7 +1042,7 @@ static int copyFile(const char *src, const char *dst)
 }
 
 /*
- * Valid values for act_led_dtparam:
+ * Valid values for act_led_dtparam for RPi:
  *
  *  Parameter                            Description
  *  -----------------------------------  ----------------------------
@@ -1050,7 +1050,7 @@ static int copyFile(const char *src, const char *dst)
  *  dtparam=act_led_trigger=default-on   Always on
  *  dtparam=act_led_trigger=heartbeat    Heartbeat blink
  *  dtparam=act_led_trigger=mmc0         SD card activity (default)
- *  dtparam=act_led_activelow=on         Invert logic (active-low)
+ *  dtparam=act_led_activelow=on         Invert logic (active-low) // Do not use it.
  */
 bool isValidActLEDParam(const char *param)
 {

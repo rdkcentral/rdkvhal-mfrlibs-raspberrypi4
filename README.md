@@ -66,5 +66,5 @@ LOG.RDK.MFRMGR = LOG DEBUG INFO ERROR
 
 ### Related Repositories
 
-- **HAL Header Repository**: [iarmmgrs/mfr/include]() [v1.1.10](https://github.com/rdkcentral/iarmmgrs/releases/tag/1.1.10)
+- **HAL Header Repository**: [iarmmgrs/mfr/include](https://github.com/rdkcentral/iarmmgrs/tree/main/mfr/include) [v1.1.10](https://github.com/rdkcentral/iarmmgrs/releases/tag/1.1.10)
 - **HAL Test Suite Repository**: [rdk-halif-test-device_settings](https://github.com/rdkcentral/rdk-halif-test-mfr)
