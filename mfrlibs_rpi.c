@@ -19,12 +19,15 @@
 
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 #include <net/if.h>
 #include <arpa/inet.h>
@@ -43,6 +46,10 @@
 
 #define BOOT_CONFIG_FILE "/boot/config.txt"
 #define BOOT_CONFIG_BACKUP_FILE "/boot/config.txt.bak"
+#define BOOTLOADER_VERSION_FILE "/sys/firmware/devicetree/base/chosen/bootloader/version"
+#define RDK_VERSION_FILE "/version.txt"
+#define DEVICE_PROPERTIES_FILE "/etc/device.properties"
+#define FIRST_USE_DATE_FILE "/boot/first_use_date.txt"
 
 const char defaultDescription[] = "RaspberryPi RDKV Reference Device";
 const char defaultProductClass[] = "RDKV";
@@ -162,6 +169,70 @@ void configMFRLibLogging(void)
 /* MFR wrapper implementations */
 
 /**
+ * @brief Atomically creates the file if it does not exist.
+ * @return 0 if created, 1 if it already existed, -1 on error.
+ */
+int createFirstUseDateFileIfNotExists(void)
+{
+    // O_CREAT | O_EXCL ensures creation fails if the file already exists
+    int fd = open(FIRST_USE_DATE_FILE, O_WRONLY | O_CREAT | O_EXCL, 0644);
+
+    if (fd < 0) {
+        if (errno == EEXIST) {
+            // File already exists - safe and expected behavior
+            return 1;
+        }
+        mfrlib_log("createFirstUseDateFileIfNotExists error creating file: %d\n", errno);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+/**
+ * @brief Get the true file creation date from FAT32 (YYYY-MM-DD)
+ * @param dateBuffer buffer to store the date string
+ * @param bufferSize size of the dateBuffer (must be >= 11)
+ * @return true if successful, false otherwise
+ */
+bool getFirstUseDate(char *dateBuffer, size_t bufferSize)
+{
+    if (!dateBuffer || bufferSize < 11) {
+        mfrlib_log("getFirstUseDate invalid input.\n");
+        return false;
+    }
+
+    struct statx stx;
+    // Explicitly ask the VFS layer for the file Birth/Creation time
+    if (statx(AT_FDCWD, FIRST_USE_DATE_FILE, 0, STATX_BTIME, &stx) != 0) {
+        mfrlib_log("statx failed to fetch file attributes. Error: %d\n", errno);
+        return false;
+    }
+
+    // Verify if the underlying FAT32 filesystem actually provided the birth time
+    if (!(stx.stx_mask & STATX_BTIME)) {
+        mfrlib_log("The kernel or mount options do not support FAT32 birth time extraction.\n");
+        return false;
+    }
+
+    // Convert the raw epoch seconds to a broken-down UTC time structure safely
+    time_t raw_time = (time_t)stx.stx_btime.tv_sec;
+    struct tm time_struct;
+    if (gmtime_r(&raw_time, &time_struct) == NULL) {
+        return false;
+    }
+
+    // Format directly into your buffer as YYYY-MM-DD
+    if (strftime(dateBuffer, bufferSize, "%Y-%m-%d", &time_struct) == 0) {
+        mfrlib_log("Buffer too small for date format execution.\n");
+        return false;
+    }
+
+    return true;
+}
+
+/**
  * @brief Get the value matching the given key from the version file
  * @param key key to search for in the '/version.txt' file
  * @param separator separator character between key and value
@@ -189,14 +260,14 @@ int getValueFromVersionFile(const char *key, char separator, char *valueOut, siz
         return retValue;
     }
 
-    if (access("/version.txt", F_OK) == -1) {
-        mfrlib_log("getValueFromVersionFile /version.txt file not found.\n");
+    if (access(RDK_VERSION_FILE, F_OK) == -1) {
+        mfrlib_log("getValueFromVersionFile %s file not found.\n", RDK_VERSION_FILE);
         return retValue;
     }
 
-    fp = fopen("/version.txt", "r");
+    fp = fopen(RDK_VERSION_FILE, "r");
     if (NULL == fp) {
-        mfrlib_log("getValueFromVersionFile fopen failed for /version.txt\n");
+        mfrlib_log("getValueFromVersionFile fopen failed for %s\n", RDK_VERSION_FILE);
         return retValue;
     }
 
@@ -222,7 +293,7 @@ int getValueFromVersionFile(const char *key, char separator, char *valueOut, siz
     }
 
     if (!found) {
-        mfrlib_log("getline failed or key not found in /version.txt\n");
+        mfrlib_log("getline failed or key not found in %s\n", RDK_VERSION_FILE);
     }
 
     return retValue;
@@ -364,8 +435,8 @@ int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOu
         return ret;
     }
 
-    if (access("/etc/device.properties", F_OK) != -1) {
-        fp = fopen("/etc/device.properties", "r");
+    if (access(DEVICE_PROPERTIES_FILE, F_OK) != -1) {
+        fp = fopen(DEVICE_PROPERTIES_FILE, "r");
         if (NULL == fp) {
             mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile fopen() error.\n");
             return ret;
@@ -399,7 +470,7 @@ int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOu
         fclose(fp);
         mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile key='%s', value='%s'\n", keyIn, valueOut);
     } else {
-        mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile device.properties file not found.\n");
+        mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile %s file not found.\n", DEVICE_PROPERTIES_FILE);
     }
     return ret;
 }
@@ -489,15 +560,52 @@ void mfrFreeBuffer(char *buf)
  * @note Refer https://github.com/rdkcentral/iarmmgrs/blob/main/mfr/include/mfrTypes.h
  */
 bool isValidMfrSerializedType(mfrSerializedType_t param) {
-    // Check if param is within the valid range of mfrSerializedType_t
-    if ((param >= mfrSERIALIZED_TYPE_MANUFACTURER && param < mfrSERIALIZED_TYPE_MAX)
-#ifdef PANEL_SERIALIZATION_TYPES
-        || (param >= mfrSERIALIZED_TYPE_COREBOARD_SERIALNUMBER && param <= mfrSERIALIZED_TYPE_PANEL_MAX) ||
-#endif /* PANEL_SERIALIZATION_TYPES */
-    ) {
-        return true;
+    return (param >= mfrSERIALIZED_TYPE_MANUFACTURER && param < mfrSERIALIZED_TYPE_MAX);
+}
+
+static void clearSerializedData(mfrSerializedData_t *data)
+{
+    if (!data) {
+        return;
     }
-    return false;
+
+    data->buf = NULL;
+    data->bufLen = 0;
+    data->freeBuf = NULL;
+}
+
+static void resetSerializedData(mfrSerializedData_t *data)
+{
+    if (!data) {
+        return;
+    }
+
+    if (data->buf && data->freeBuf) {
+        data->freeBuf(data->buf);
+    }
+
+    clearSerializedData(data);
+}
+
+static mfrError_t allocateSerializedDataBuffer(mfrSerializedData_t *data)
+{
+    resetSerializedData(data);
+    data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
+    if (!data->buf) {
+        mfrlib_log("Memory alloc error\n");
+        return mfrERR_MEMORY_EXHAUSTED;
+    }
+
+    data->freeBuf = mfrFreeBuffer;
+    return mfrERR_NONE;
+}
+
+static void releaseSerializedDataBuffer(mfrSerializedData_t *data)
+{
+    if (data && data->buf) {
+        mfrFreeBuffer(data->buf);
+    }
+    clearSerializedData(data);
 }
 
 /**
@@ -524,9 +632,6 @@ bool isValidMfrSerializedType(mfrSerializedType_t param) {
  */
 mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *data)
 {
-    char cmd[MAX_BUF_LEN] = {0};
-    char buffer[MAX_BUF_LEN] = {0};
-    FILE *fp = NULL;
     mfrError_t ret = mfrERR_NONE;
 
     if (!isLibraryInitialized()) {
@@ -539,22 +644,18 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         return mfrERR_INVALID_PARAM;
     }
 
-    data->bufLen = 0;
+    resetSerializedData(data);
 
     switch (param) {
     case mfrSERIALIZED_TYPE_MANUFACTURER:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             /* retrieving tag MANUFACTURE from /etc/device.properties */
             if (getValueMatchingKeyFromDevicePropertiesFile("MANUFACTURE", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Manufacturer= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -562,99 +663,90 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         break;
     /* unique identifier of the Manufacturer :: we are using the first 6 chars of the mac address */
     case mfrSERIALIZED_TYPE_MANUFACTUREROUI:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             if (getManufacturerOUIHexString(data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Manufacturer OUI= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getManufacturerOUIHexString failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
         }
         break;
     case mfrSERIALIZED_TYPE_MODELNAME:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+    case mfrSERIALIZED_TYPE_PROVISIONED_MODELNAME:
+    case mfrSERIALIZED_TYPE_PMI:
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             /* retrieving tag DEVICE_NAME from /etc/device.properties */
             if (getValueMatchingKeyFromDevicePropertiesFile("DEVICE_NAME", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Model Name= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
         }
         break;
     case mfrSERIALIZED_TYPE_DESCRIPTION:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             /* Add description as 'RDKV Reference Device' */
             strncpy(data->buf, defaultDescription, ((sizeof(defaultDescription) < MAX_BUF_LEN) ? sizeof(defaultDescription) : MAX_BUF_LEN));
             data->bufLen = strlen(data->buf);
-            data->freeBuf = mfrFreeBuffer;
             mfrlib_log("Description= '%s', len=%d\n", data->buf, data->bufLen);
         }
         break;
     case mfrSERIALIZED_TYPE_PRODUCTCLASS:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             /* Add product class as 'RDKV' */
             strncpy(data->buf, defaultProductClass, ((sizeof(defaultProductClass) < MAX_BUF_LEN) ? sizeof(defaultProductClass) : MAX_BUF_LEN));
             data->bufLen = strlen(data->buf);
-            data->freeBuf = mfrFreeBuffer;
             mfrlib_log("Product Class= '%s', len=%d\n", data->buf, data->bufLen);
         }
         break;
     case mfrSERIALIZED_TYPE_SERIALNUMBER:
     case mfrSERIALIZED_TYPE_MANUFACTURING_SERIALNUMBER:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             /* retrieving tag SERIAL_NUMBER from /etc/device.properties */
             if (getValueMatchingKeyFromCPUINFO("Serial", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Serial Number= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
         }
         break;
     case mfrSERIALIZED_TYPE_HARDWAREVERSION:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             /* retrieving tag REVISION from /etc/device.properties */
             if (getValueMatchingKeyFromCPUINFO("Revision", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Hardware Version= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
+                ret = mfrERR_FLASH_READ_FAILED;
+            }
+        }
+        break;
+    case mfrSERIALIZED_TYPE_FIRSTUSEDATE:
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
+            if (getFirstUseDate(data->buf, MAX_BUF_LEN)) {
+                data->bufLen = strlen(data->buf);
+                mfrlib_log("First Use Date= '%s', len=%d\n", data->buf, data->bufLen);
+            } else {
+                releaseSerializedDataBuffer(data);
+                mfrlib_log("getFirstUseDate failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
         }
@@ -662,34 +754,26 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
     case mfrSERIALIZED_TYPE_DEVICEMAC:
     case mfrSERIALIZED_TYPE_ETHERNETMAC:
     case mfrSERIALIZED_TYPE_ESTBMAC:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             if (getInterfaceMACString("eth0", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Device MAC= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getInterfaceMACString failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
         }
         break;
     case mfrSERIALIZED_TYPE_WIFIMAC:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             if (getInterfaceMACString("wlan0", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("WiFi MAC= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getInterfaceMACString failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -697,54 +781,42 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         break;
     case mfrSERIALIZED_TYPE_SOFTWAREVERSION:
         /* return defaultSoftwareVersion */
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             strncpy(data->buf, defaultSoftwareVersion, ((sizeof(defaultSoftwareVersion) < MAX_BUF_LEN) ? sizeof(defaultSoftwareVersion) : MAX_BUF_LEN));
             data->bufLen = strlen(data->buf);
-            data->freeBuf = mfrFreeBuffer;
             mfrlib_log("Software Version= '%s', len=%d\n", data->buf, data->bufLen);
         }
         break;
     case mfrSERIALIZED_TYPE_MOCAMAC:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             /* get MOCA_INTERFACE from device.properties and retieve its MAC */
             char mocaInterface[16] = {0};
             if (getValueMatchingKeyFromDevicePropertiesFile("MOCA_INTERFACE", mocaInterface, sizeof(mocaInterface)) == 0) {
                 if (getInterfaceMACString(mocaInterface, data->buf, MAX_BUF_LEN) == 0) {
                     data->bufLen = strlen(data->buf);
-                    data->freeBuf = mfrFreeBuffer;
                     mfrlib_log("MOCA MAC= '%s', len=%d\n", data->buf, data->bufLen);
                 } else {
-                    mfrFreeBuffer(data->buf);
+                    releaseSerializedDataBuffer(data);
                     mfrlib_log("getInterfaceMACString failed, return mfrERR_FLASH_READ_FAILED.\n");
                     ret = mfrERR_FLASH_READ_FAILED;
                 }
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getValueMatchingKeyFromDevicePropertiesFile failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
         }
         break;
     case mfrSERIALIZED_TYPE_BLUETOOTHMAC:
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             if (getBDAddress(data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("Bluetooth MAC= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getBDAddress failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -753,17 +825,13 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
     case mfrSERIALIZED_TYPE_HWID:
     case mfrSERIALIZED_TYPE_MODELNUMBER:
         /* Read cpuinfo and use Revision */
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             if (getValueMatchingKeyFromCPUINFO("Revision", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("HWID= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -771,17 +839,13 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         break;
     case mfrSERIALIZED_TYPE_SOC_ID:
         /* Read cpuinfo and use Hardware */
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
             if (getValueMatchingKeyFromCPUINFO("Hardware", data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
                 mfrlib_log("SOC ID= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
@@ -789,37 +853,66 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         break;
     case mfrSERIALIZED_TYPE_IMAGENAME:
         /* Read /version.txt and extract 'imagename' */
-        data->buf = (char *)calloc(MAX_BUF_LEN, sizeof(char));
-        if (!data->buf) {
-            mfrlib_log("Memory alloc error\n");
-            ret = mfrERR_MEMORY_EXHAUSTED;
-        } else {
-            if (getValueFromVersionFile("imagename", ':', data->buf, MAX_BUF_LEN) == 0) {
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
+            const char *versionKey = "imagename";
+            if (getValueFromVersionFile(versionKey, ':', data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
-                data->freeBuf = mfrFreeBuffer;
-                mfrlib_log("Image Name= '%s', len=%d\n", data->buf, data->bufLen);
+                mfrlib_log("Serialized version key '%s'= '%s', len=%d\n", versionKey, data->buf, data->bufLen);
             } else {
-                mfrFreeBuffer(data->buf);
+                releaseSerializedDataBuffer(data);
                 mfrlib_log("getValueFromVersionFile failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
         }
         break;
+    case mfrSERIALIZED_TYPE_IMAGETYPE:
+        /* Does not support DRI image, so always return PCI. */
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
+            strncpy(data->buf, "PCI", MAX_BUF_LEN);
+            data->bufLen = strlen(data->buf);
+            mfrlib_log("Image Type= '%s', len=%d\n", data->buf, data->bufLen);
+        }
+        break;
+    case mfrSERIALIZED_TYPE_BLVERSION:
+        /* Read from BOOTLOADER_VERSION_FILE, its a githash, trim to 7 byte */
+        ret = allocateSerializedDataBuffer(data);
+        if (ret == mfrERR_NONE) {
+            // Open the file with low-level POSIX call (No internal buffers allocated)
+            int fd = open(BOOTLOADER_VERSION_FILE, O_RDONLY);
+            if (fd >= 0) {
+                // Read exactly up to 7 bytes directly into the target buffer
+                ssize_t bytesRead = read(fd, data->buf, 7);
+                if (bytesRead > 0) {
+                    data->buf[bytesRead] = '\0'; // Properly null-terminate
+                    data->bufLen = (int)bytesRead;
+                    mfrlib_log("Bootloader Version= '%s', len=%d\n", data->buf, data->bufLen);
+                } else {
+                    releaseSerializedDataBuffer(data);
+                    mfrlib_log("read failed, return mfrERR_FLASH_READ_FAILED.\n");
+                    ret = mfrERR_FLASH_READ_FAILED;
+                }
+                close(fd);
+            } else {
+                releaseSerializedDataBuffer(data);
+                mfrlib_log("open failed for %s, return mfrERR_FLASH_READ_FAILED.\n", BOOTLOADER_VERSION_FILE);
+                ret = mfrERR_FLASH_READ_FAILED;
+            }
+        }
+        break;
     case mfrSERIALIZED_TYPE_PROVISIONINGCODE:
-    case mfrSERIALIZED_TYPE_FIRSTUSEDATE:
     case mfrSERIALIZED_TYPE_PDRIVERSION:
     case mfrSERIALIZED_TYPE_HDMIHDCP:
     case mfrSERIALIZED_TYPE_MAX:
     case mfrSERIALIZED_TYPE_WPSPIN:
     case mfrSERIALIZED_TYPE_RF4CEMAC:
-    case mfrSERIALIZED_TYPE_PROVISIONED_MODELNAME:
-    case mfrSERIALIZED_TYPE_PMI:
-    case mfrSERIALIZED_TYPE_IMAGETYPE:
-    case mfrSERIALIZED_TYPE_BLVERSION:
     case mfrSERIALIZED_TYPE_REGION:
     case mfrSERIALIZED_TYPE_BDRIVERSION:
     case mfrSERIALIZED_TYPE_LED_WHITE_LEVEL:
     case mfrSERIALIZED_TYPE_LED_PATTERN:
+    case mfrSERIALIZED_TYPE_SKYMODELNAME:
+    case mfrSERIALIZED_TYPE_DE_SERIAL_PREFIX:
     default:
         /* Does not have any data. Report unsupported. */
         mfrlib_log("Unsupported mfrSerializedType_t '%d'\n", param);
@@ -932,7 +1025,14 @@ static int copyFile(const char *src, const char *dst)
     int ret = 0;
     while (remaining > 0) {
         ssize_t copied = copy_file_range(in, &off_in, out, &off_out, (size_t)remaining, 0);
-        if (copied == -1) { ret = -1; break; }
+        if (copied == -1) {
+            ret = -1;
+            break;
+        }
+        if (copied == 0) {
+            ret = -1;
+            break;
+        }
         remaining -= copied;
     }
 
@@ -954,19 +1054,19 @@ static int copyFile(const char *src, const char *dst)
  */
 bool isValidActLEDParam(const char *param)
 {
-	const char *validParams[] = {
-		"dtparam=act_led_trigger=none",
-		"dtparam=act_led_trigger=default-on",
-		"dtparam=act_led_trigger=heartbeat",
-		"dtparam=act_led_trigger=mmc0"
-	};
-	size_t numValidParams = sizeof(validParams) / sizeof(validParams[0]);
-	for (size_t i = 0; i < numValidParams; i++) {
-		if (strcmp(param, validParams[i]) == 0) {
-			return true;
-		}
-	}
-	return false;
+    const char *validParams[] = {
+        "dtparam=act_led_trigger=none",
+        "dtparam=act_led_trigger=default-on",
+        "dtparam=act_led_trigger=heartbeat",
+        "dtparam=act_led_trigger=mmc0"
+    };
+    size_t numValidParams = sizeof(validParams) / sizeof(validParams[0]);
+    for (size_t i = 0; i < numValidParams; i++) {
+        if (strcmp(param, validParams[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 mfrError_t updateBootConfigFile(const char *act_led_dtparam)
@@ -1334,6 +1434,11 @@ mfrError_t mfr_init(void)
         return mfrERR_ALREADY_INITIALIZED;
     }
 #endif /* ENABLE_SINGLE_INSTANCE_LOCK */
+
+    if (createFirstUseDateFileIfNotExists() == -1) {
+        // Do not treat as error, just log it. The first use date file is not critical for MFR library operation.
+        mfrlib_log("mfr_init createFirstUseDateFileIfNotExists failed\n");
+    }
 
     isInitialized = 1;
     return mfrERR_NONE;
