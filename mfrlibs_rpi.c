@@ -124,14 +124,16 @@ int isLibraryInitialized(void)
 /* Logging function */
 void mfrlib_log(const char *format, ...)
 {
-    if (!isDebugEnabled) {
+    if (!isDebugEnabled || !format) {
         return;
     }
 
     va_list args;
     va_start(args, format);
+    fprintf(stdout, "MFRHAL: ");
     vfprintf(stdout, format, args);
     va_end(args);
+    fflush(stdout);
 }
 
 /**
