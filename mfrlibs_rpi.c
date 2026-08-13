@@ -65,7 +65,7 @@ static int isDebugEnabled = 0;
 static int lockFd = -1;
 static int lockRefCount = 0;
 
-int acquireLock(void)
+static int acquireLock(void)
 {
     if (lockRefCount > 0) {
         lockRefCount++;
@@ -87,7 +87,7 @@ int acquireLock(void)
     return 0;
 }
 
-int releaseLock(void)
+static int releaseLock(void)
 {
     if (lockRefCount > 1) {
         lockRefCount--;
@@ -106,7 +106,7 @@ int releaseLock(void)
 
 #endif /* ENABLE_SINGLE_INSTANCE_LOCK */
 
-int isLibraryInitialized(void)
+static int isLibraryInitialized(void)
 {
     if (!isInitialized) {
         return 0;
@@ -122,7 +122,7 @@ int isLibraryInitialized(void)
 }
 
 /* Logging function */
-void mfrlib_log(const char *format, ...)
+static void mfrlib_log(const char *format, ...)
 {
     if (!isDebugEnabled || !format) {
         return;
@@ -140,7 +140,7 @@ void mfrlib_log(const char *format, ...)
  * @brief enable/disable debug logging
  * @info This function reads the debug.ini configuration file and enables logging if debug is enabled
  */
-void configMFRLibLogging(void)
+static void configMFRLibLogging(void)
 {
     if (access(LOG_CONFIG_FILE, F_OK) == -1) {
         perror("configMFRLibLogging error accessing debug.ini\n");
@@ -199,7 +199,7 @@ static int createFirstUseDateFileIfNotExists(void)
  * @param bufferSize size of the dateBuffer (must be >= 11)
  * @return true if successful, false otherwise
  */
-bool getFirstUseDate(char *dateBuffer, size_t bufferSize)
+static bool getFirstUseDate(char *dateBuffer, size_t bufferSize)
 {
     if (!dateBuffer || bufferSize < 11) {
         mfrlib_log("getFirstUseDate invalid input.\n");
@@ -243,7 +243,7 @@ bool getFirstUseDate(char *dateBuffer, size_t bufferSize)
  * @param maxLen size of the output buffer
  * @return 0 on success, -1 on failure
  */
-int getValueFromVersionFile(const char *key, char separator, char *valueOut, size_t maxLen)
+static int getValueFromVersionFile(const char *key, char separator, char *valueOut, size_t maxLen)
 {
     FILE *fp;
     char *line = NULL;
@@ -308,7 +308,7 @@ int getValueFromVersionFile(const char *key, char separator, char *valueOut, siz
  * @param maxLen size of the output buffer
  * @return 0 on success, -1 on failure
  */
-int getBDAddress(char *bdAddress, size_t maxLen)
+static int getBDAddress(char *bdAddress, size_t maxLen)
 {
     FILE *fp = NULL;
     char buffer[MAX_BUF_LEN] = {0};
@@ -355,7 +355,7 @@ int getBDAddress(char *bdAddress, size_t maxLen)
  * @param size size of the output buffer
  * @return 0 on success, -1 on failure
  */
-int getInterfaceMACString(char *iface, char *outMACString, size_t size)
+static int getInterfaceMACString(char *iface, char *outMACString, size_t size)
 {
     int fd = -1;
     struct ifreq ifr;
@@ -393,7 +393,7 @@ int getInterfaceMACString(char *iface, char *outMACString, size_t size)
  * @param ouiHexString output buffer to store the manufacturer OUI in hex string format; should be aleast 7 bytes long
  * @return 0 on success, -1 on failure
  */
-int getManufacturerOUIHexString(char *ouiHexString, size_t size)
+static int getManufacturerOUIHexString(char *ouiHexString, size_t size)
 {
     int retVal = -1;
     char macAddress[MAC_ADDRESS_SIZE] = {0};
@@ -424,7 +424,7 @@ int getManufacturerOUIHexString(char *ouiHexString, size_t size)
  * @param size size of the output buffer
  * @return 0 on success, -1 on failure
 */
-int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOut, size_t size)
+static int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOut, size_t size)
 {
     FILE *fp = NULL;
     char buffer[MAX_BUF_LEN] = {0};
@@ -485,7 +485,7 @@ int getValueMatchingKeyFromDevicePropertiesFile(const char *keyIn, char *valueOu
  * @param size size of the output buffer
  * @return 0 on success, -1 on failure
 */
-int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t size)
+static int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t size)
 {
     FILE *fp = NULL;
     char buffer[MAX_BUF_LEN] = {0};
@@ -548,7 +548,7 @@ int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t siz
  * @param size size of the output buffer
  * @return 0 on success, -1 on failure
  */
-int getSoCIDFromDeviceTree(char *socIdOut, size_t size)
+static int getSoCIDFromDeviceTree(char *socIdOut, size_t size)
 {
     if (!socIdOut || size == 0) {
         return -1;
@@ -1097,7 +1097,7 @@ static int copyFile(const char *src, const char *dst)
  *  dtparam=act_led_trigger=mmc0         SD card activity (default)
  *  dtparam=act_led_activelow=on         Invert logic (active-low) // Do not use it.
  */
-bool isValidActLEDParam(const char *param)
+static bool isValidActLEDParam(const char *param)
 {
     const char *validParams[] = {
         "dtparam=act_led_trigger=none",
@@ -1114,7 +1114,7 @@ bool isValidActLEDParam(const char *param)
     return false;
 }
 
-mfrError_t updateBootConfigFile(const char *act_led_dtparam)
+static mfrError_t updateBootConfigFile(const char *act_led_dtparam)
 {
     FILE *fp = NULL;
     int found = 0;
@@ -1443,7 +1443,7 @@ mfrError_t mfrGetFSRflag(uint16_t *newFsrFlag)
 #endif /* !USE_HEADER_SPECIFIC_RETURN_STATUS */
 }
 
-bool isValidMfrImageType(mfrImageType_t type) {
+static bool isValidMfrImageType(mfrImageType_t type) {
     if (type >= mfrIMAGE_TYPE_CDL && type < mfrIMAGE_TYPE_MAX) {
         return true;
     }
