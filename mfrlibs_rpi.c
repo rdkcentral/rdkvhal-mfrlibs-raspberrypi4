@@ -50,6 +50,7 @@
 #define RDK_VERSION_FILE "/version.txt"
 #define DEVICE_PROPERTIES_FILE "/etc/device.properties"
 #define FIRST_USE_DATE_FILE "/boot/first_use_date.txt"
+#define SOCID_DEVICETREE_FILE "/proc/device-tree/compatible"
 
 const char defaultDescription[] = "RaspberryPi RDKV Reference Device";
 const char defaultProductClass[] = "RDKV";
@@ -539,6 +540,48 @@ int getValueMatchingKeyFromCPUINFO(const char *keyIn, char *valueOut, size_t siz
     return ret;
 }
 
+/**
+ * @brief Get the SoC ID from the device tree
+ * @param socIdOut output buffer to store the SoC ID; should be atleast 50 bytes long
+ * @param size size of the output buffer
+ * @return 0 on success, -1 on failure
+ */
+int getSoCIDFromDeviceTree(char *socIdOut, size_t size)
+{
+    if (!socIdOut || size == 0) {
+        return -1;
+    }
+
+    int fd = open(SOCID_DEVICETREE_FILE, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        mfrlib_log("getSoCIDFromDeviceTree error opening %s: %d\n", SOCID_DEVICETREE_FILE, errno);
+        return -1;
+    }
+
+    char buffer[MAX_BUF_LEN + 1];
+    ssize_t bytesRead = read(fd, buffer, MAX_BUF_LEN);
+    close(fd);
+
+    if (bytesRead <= 0) {
+        mfrlib_log("getSoCIDFromDeviceTree error reading %s: %d\n", SOCID_DEVICETREE_FILE, errno);
+        return -1;
+    }
+
+    buffer[bytesRead] = '\0';
+
+    char *vendorStart = memmem(buffer, (size_t)bytesRead, "brcm,", 5);
+    if (!vendorStart) {
+        mfrlib_log("getSoCIDFromDeviceTree Broadcom entry not present in %s\n", SOCID_DEVICETREE_FILE);
+        return -1;
+    }
+
+    // Skip over the vendor prefix "brcm," to isolate the chip name.
+    char *socStart = vendorStart + 5;
+    // No need to check the return value of snprintf here since socIdOut is a pre-allocated buffer.
+    snprintf(socIdOut, size, "%s", socStart);
+    return 0;
+}
+
 /*************************************************************************************/
 /* MFR API implementation */
 
@@ -841,12 +884,12 @@ mfrError_t mfrGetSerializedData(mfrSerializedType_t param, mfrSerializedData_t *
         /* Read cpuinfo and use Hardware */
         ret = allocateSerializedDataBuffer(data);
         if (ret == mfrERR_NONE) {
-            if (getValueMatchingKeyFromCPUINFO("Hardware", data->buf, MAX_BUF_LEN) == 0) {
+            if (getSoCIDFromDeviceTree(data->buf, MAX_BUF_LEN) == 0) {
                 data->bufLen = strlen(data->buf);
                 mfrlib_log("SOC ID= '%s', len=%d\n", data->buf, data->bufLen);
             } else {
                 releaseSerializedDataBuffer(data);
-                mfrlib_log("getValueMatchingKeyFromCPUINFO failed, return mfrERR_FLASH_READ_FAILED.\n");
+                mfrlib_log("getSoCIDFromDeviceTree failed, return mfrERR_FLASH_READ_FAILED.\n");
                 ret = mfrERR_FLASH_READ_FAILED;
             }
         }
