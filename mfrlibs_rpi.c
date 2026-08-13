@@ -1146,7 +1146,7 @@ static mfrError_t updateBootConfigFile(const char *act_led_dtparam)
         return mfrERR_WRITE_FLASH_FAILED;
     }
 
-    // Back up the original file to /opt while holding the lock.
+    // Back up the original file while holding the lock.
     if (copyFile(BOOT_CONFIG_FILE, BOOT_CONFIG_BACKUP_FILE) != 0) {
         mfrlib_log("updateBootConfigFile failed to create backup at %s\n", BOOT_CONFIG_BACKUP_FILE);
         fclose(fp);
