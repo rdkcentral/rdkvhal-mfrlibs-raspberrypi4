@@ -625,7 +625,9 @@ static void resetSerializedData(mfrSerializedData_t *data)
         return;
     }
 
-    if (data->buf && data->freeBuf) {
+    // Only free buffers that were allocated by this HAL to avoid calling an uninitialized/foreign function
+    // pointer when callers pass an uninitialized mfrSerializedData_t struct.
+    if (data->buf && data->freeBuf == mfrFreeBuffer) {
         data->freeBuf(data->buf);
     }
 
