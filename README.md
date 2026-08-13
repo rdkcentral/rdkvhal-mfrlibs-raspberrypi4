@@ -31,7 +31,7 @@ The current implementation of `mfrGetSerializedData()` in `mfrlibs_rpi.c` suppor
 | `mfrSERIALIZED_TYPE_BLUETOOTHMAC` | Parses Bluetooth address from `hciconfig -a` output | Shell command output |
 | `mfrSERIALIZED_TYPE_HWID` | Reads the `Revision` field | `/proc/cpuinfo` |
 | `mfrSERIALIZED_TYPE_MODELNUMBER` | Same implementation as `mfrSERIALIZED_TYPE_HWID` | `/proc/cpuinfo` |
-| `mfrSERIALIZED_TYPE_SOC_ID` | Reads the `Hardware` field | `/proc/device-tree/compatible` |
+| `mfrSERIALIZED_TYPE_SOC_ID` | Reads chip details from devicetree | `/proc/device-tree/compatible` |
 | `mfrSERIALIZED_TYPE_IMAGENAME` | Reads the `imagename` key | `/version.txt` |
 | `mfrSERIALIZED_TYPE_IMAGETYPE` | Returns the built-in constant `PCI` | Constant in code |
 | `mfrSERIALIZED_TYPE_BLVERSION` | Reads the first 7 bytes from the bootloader version node | `/sys/firmware/devicetree/base/chosen/bootloader/version` |

@@ -1232,7 +1232,7 @@ cleanup:
 /**
  * @brief Sets bootloader LED pattern
  *
- * This function stores the bootup pattern in the persistance storage for bootloader to read
+ * This function stores the bootup pattern in the persistence storage for bootloader to read
  * and control the front panel LED and/or TV backlight sequence on bootup
  *
  * @param [in] pattern : options are defined by enum mfrBlPattern_t. @see mfrBlPattern_t
@@ -1276,6 +1276,7 @@ mfrError_t mfrSetBootloaderPattern(mfrBlPattern_t pattern)
             break;
         case mfrBL_PATTERN_LOGO_DISABLED:
             // Logo disabled pattern - keep the LOGO off
+            // No need to return ERROR, RPI BL does not allow external LOGO files.
             mfrlib_log("mfrSetBootloaderPattern Logo disabled pattern\n");
             break;
         default:
@@ -1618,7 +1619,7 @@ WIFI_API_RESULT WIFI_GetCredentials(WIFI_DATA *pData)
 }
 
 /**
- * @brief Sets wifi ssid name, password and the security mode in the MFR persistance storage
+ * @brief Sets wifi ssid name, password and the security mode in the MFR persistence storage
  *
  * @param pData [in] : Sets the ssid credentials. @see WIFI_DATA
  *
@@ -1654,7 +1655,7 @@ WIFI_API_RESULT WIFI_SetCredentials(WIFI_DATA *pData)
 }
 
 /**
- * @brief Clears the wifi credentials saved in the  MFR persistance storage @see WIFI_DATA
+ * @brief Clears the wifi credentials saved in the  MFR persistence storage @see WIFI_DATA
  *
  * @return    WIFI_API_RESULT                     - Status
  * @retval    WIFI_API_RESULT_SUCCESS             - Success
