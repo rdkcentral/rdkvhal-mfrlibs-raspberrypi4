@@ -31,6 +31,14 @@ logger() {
     printf '%s FlashApp.sh > %s\n' "$timestamp" "$1" >&2
 }
 
+# If FlashApp binary exists, then use it; else use the FlashApp.sh script.
+if [ -f /usr/bin/FlashApp ]; then
+    logger "Using the FlashApp binary for flashing."
+    # Redirect the logs to logger.
+    /usr/bin/FlashApp "$@" 2>&1 | while IFS= read -r line; do logger "$line"; done
+    exit $?
+fi
+
 # Keep the flash worker less aggressive so it does not starve the parent media process.
 # This only affects the child commands used in this script, not the parent process.
 run_reduced_priority() {

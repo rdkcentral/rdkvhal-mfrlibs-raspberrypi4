@@ -4,6 +4,22 @@ This document describes the native OTA flasher implemented by `FlashApp.cpp`,
 `FlashProcessor.hpp`, and `FlashConfig.hpp`. The repository does not currently
 contain a `FlashConfig.cpp`; its configuration is defined in the header.
 
+## Building
+
+The repository uses CMake to build the native flasher alongside the HAL
+library and utility. See [Building with CMake](README.md#building-with-cmake)
+for prerequisites, installation, build options, and cross-compilation.
+
+After configuring the build directory, build only the flasher with:
+
+```sh
+cmake --build build --target FlashApp
+```
+
+The executable is `build/FlashApp` with a single-configuration generator.
+It links libarchive and thread support, requires C++17 filesystem operations,
+and is installed to the configured binary directory.
+
 ## Invocation
 
 The entry point accepts either an OTA path directly or a directory and file

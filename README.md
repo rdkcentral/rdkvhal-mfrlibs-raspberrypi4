@@ -3,6 +3,61 @@ RDKV IARMMGRS MFR HAL Implementation of RPi4
 
 The implementation adheres to the IARMMGRS MFR HAL Interface (HALIF) requirements.
 
+### Building with CMake
+
+This is a Linux-targeted CMake project. Building requires CMake 3.16 or newer,
+C and C++ compilers (C99 and C++17), pkg-config, libarchive development files,
+and the RDK MFR HAL and IARM headers.
+
+```sh
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib
+cmake --build build
+DESTDIR="$PWD/staging" cmake --install build
+```
+
+The build produces `libRDKMfrLib.so`, `mfrHalUtility`, and `FlashApp`. The staged
+installation above places the library under `staging/usr/lib` and both
+executables under `staging/usr/bin`. The library retains the previous
+`libRDKMfrLib.so.0` SONAME and `0.0.0` library version.
+`FlashProcessor.hpp` and `FlashConfig.hpp`
+are header-only parts of `FlashApp`; they are not separate compilation units.
+The shell wrapper is not installed by the build, matching the previous behavior.
+
+| CMake option | Default | Purpose |
+| --- | --- | --- |
+| `ENABLE_THERMAL_PROTECTION` | `OFF` | Includes the HAL thermal protection functions. |
+| `ENABLE_SINGLE_INSTANCE_LOCK` | `OFF` | Enables the HAL single-instance lock. |
+| `RDKMFRLIBS_INCLUDE_DIRS` | RDK header directories under the compiler sysroot's `/usr/include` | Semicolon-separated HAL and IARM include directories. |
+| `RDKMFRLIBS_LIBS` | Empty | Semicolon-separated additional HAL libraries. |
+
+For example, enable both optional HAL features with
+`-DENABLE_THERMAL_PROTECTION=ON -DENABLE_SINGLE_INSTANCE_LOCK=ON`.
+The HAL lock option does not control `FlashApp`'s own lock.
+
+For cross-compilation, initialize the target SDK environment and supply its
+CMake toolchain file:
+
+```sh
+cmake -S . -B build \
+    -DCMAKE_TOOLCHAIN_FILE=/path/to/sdk/toolchain.cmake \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib
+cmake --build build
+```
+
+The toolchain should configure `CMAKE_SYSROOT`, the target C/C++ compilers, and
+target dependency lookup. Ensure pkg-config uses the target's libarchive
+metadata, not the build host's. Override `RDKMFRLIBS_INCLUDE_DIRS` if the SDK
+stores the RDK headers elsewhere. Filesystem checks link but do not run target
+executables; older GCC toolchains automatically link `stdc++fs` when needed.
+
+CMake replaces Autotools: `autoreconf`, `configure`, and Libtool `.la` files
+are no longer provided. External Yocto recipes must switch from
+`inherit autotools` to `inherit cmake pkgconfig` and add `libarchive` to
+`DEPENDS`. Replace `--enable-thermalprotection` with
+`-DENABLE_THERMAL_PROTECTION=ON` and `--enable-single-instance-lock` with
+`-DENABLE_SINGLE_INSTANCE_LOCK=ON`.
+
 ### Serialized Data Support
 
 This repository is an STB-oriented MFR HAL implementation. Support for `PANEL_SERIALIZATION_TYPES` is intentionally out of scope and those values are not accepted by the serialized-type validator on this target.
