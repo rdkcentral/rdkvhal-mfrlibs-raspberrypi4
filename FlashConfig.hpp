@@ -26,10 +26,7 @@
 
 namespace FlashConfig {
     static constexpr const char* TEMPORARY_MOUNT_ROOT = "/opt/ota/extblock";
-    static constexpr const char* EXTRACTED_IMAGE_DIRECTORY = "/opt/ota/wicimage";
     static constexpr const char* BOOT_MOUNT_DIRECTORY = "/opt/ota/extblock/ota_boot";
-    static constexpr const char* ROOT_FILESYSTEM_MOUNT_DIRECTORY = "/opt/ota/extblock/ota_rootfs";
-    static constexpr const char* TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY = "/opt/ota/extblock/target_rootfs";
     static constexpr const char* BOOT_BACKUP_DIRECTORY = "/opt/ota/extblock/old_boot_bkup";
     static constexpr const char* BOOT_DIRECTORY = "/boot";
     static constexpr const char* BOOT_COMMAND_LINE_PATH = "/boot/cmdline.txt";
@@ -37,7 +34,6 @@ namespace FlashConfig {
     static constexpr const char* LOOP_CONTROL_DEVICE = "/dev/loop-control";
     static constexpr const char* LOOP_DEVICE_PREFIX = "/dev/loop";
     static constexpr const char* INSTANCE_LOCK_FILE = "/var/run/flash_app.lock";
-    static constexpr const char* EXT4_FILESYSTEM_TYPE = "ext4";
     static constexpr const char* VFAT_FILESYSTEM_TYPE = "vfat";
     static constexpr const char* LOG_TAG = "[FLASHER] ";
     static constexpr const char* ROOTFS_BANK_A_DEVICE = "/dev/mmcblk0p2";
@@ -45,14 +41,8 @@ namespace FlashConfig {
     static constexpr std::size_t GZIP_HEADER_SIZE = 2;
     static constexpr unsigned char GZIP_HEADER_BYTE_1 = 0x1F;
     static constexpr unsigned char GZIP_HEADER_BYTE_2 = 0x8B;
-    static constexpr long long MBR_SIGNATURE_OFFSET = 510;
-    static constexpr std::size_t MBR_SIGNATURE_SIZE = 2;
-    static constexpr unsigned char MBR_SIGNATURE_BYTE_1 = 0x55;
-    static constexpr unsigned char MBR_SIGNATURE_BYTE_2 = 0xAA;
-    static constexpr std::size_t ARCHIVE_READ_BLOCK_SIZE = 10240;
-    static constexpr std::size_t FILE_COPY_BLOCK_SIZE = 64 * 1024;
     static constexpr int INVALID_FILE_DESCRIPTOR = -1;
-    static constexpr int LOOP_DEVICE_STABILIZATION_DELAY_MS = 200;
+    static constexpr int LOOP_DEVICE_STABILIZATION_DELAY_MS = 50;
     static constexpr int STATUS_NOTIFY_INTERVAL_SECONDS = 2;
 
     // Direct Native Resource Throttling Parameters

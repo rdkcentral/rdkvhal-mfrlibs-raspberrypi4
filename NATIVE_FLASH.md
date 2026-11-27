@@ -63,35 +63,31 @@ The native flasher uses the HAL status types with richer phase notifications:
   the callback because the HAL callback signature has no data argument.
 
 `ABORTED` is an alternative to `COMPLETED`, not a normal success phase.
-`VERIFYING` covers extraction, the existing MBR checks, backup, and image
-mount preparation; it does not introduce signature or checksum verification.
-`FLASHING` starts before erasing the passive bank and continues through boot
-copying and the bank switch.
+`VERIFYING` covers validation of the input archive and partition table, active
+bank selection, and the `/boot` backup. The flasher validates gzip/tar
+integrity, MBR geometry, and GPT checksums when applicable; it does not verify
+a cryptographic image signature. `FLASHING` begins before writing the passive
+bank and continues through boot copying and the bank switch.
 
 Progress is measured within weighted stages, rather than advanced by a timer:
 
 | Work | Percentage range | Measurement |
 | --- | --- | --- |
-| Archive extraction | 0-30% | Compressed archive bytes consumed by libarchive |
-| Image validation | 30-35% | Completion of the existing MBR checks |
-| Boot backup | 35-40% | Bytes copied |
-| Loop and mount preparation | 40-45% | Preparation milestones |
-| Passive root filesystem copy | 45-80% | Bytes copied |
+| Boot backup and preparation | 0-40% | Bytes copied |
+| Raw partition streaming and validation | 40-80% | Boot and rootfs partition bytes written |
 | Boot partition copy | 80-90% | Bytes copied |
 | Boot command-line update | 90-99% | Successful bank-switch update |
 
-Copies update the byte count after each 64 KiB block, including within large
-files, and preserve file permissions. Percentages never decrease, and 100% is
-reserved for successful completion. Archive progress is approximate because
-libarchive buffers compressed input. Directory scanning, deletion, and disk
-synchronization can still hold a percentage steady; progress is not fabricated
-while those operations run.
+Raw partition progress counts bytes written to a staged boot image and the
+passive rootfs. Rootfs data is flushed periodically and synchronized before
+the bank switch; progress is not advanced by a timer. Percentages never
+decrease, and 100% is reserved for successful completion.
 
 | Failure | Returned error |
 | --- | --- |
-| Archive extraction or loop-device setup | `mfrERR_SRC_FILE_ERROR` |
-| No MBR image, or image partition mount failure | `mfrERR_BAD_IMAGE_HEADER` |
-| Passive bank mount, boot copy, or filesystem exception | `mfrERR_WRITE_FLASH_FAILED` |
+| Boot loop-device setup | `mfrERR_SRC_FILE_ERROR` |
+| Invalid partition table or staged boot image mount failure | `mfrERR_BAD_IMAGE_HEADER` |
+| Input/archive read failure, passive-bank write, boot copy, or filesystem exception | `mfrERR_WRITE_FLASH_FAILED` |
 | `/boot/cmdline.txt` update | `mfrERR_UPDATE_BOOT_PARAMS_FAILED` |
 
 ## Update Workflow
@@ -102,45 +98,55 @@ while those operations run.
    second instance reports that an update is active and aborts.
 2. Checks that the input path exists and applies the configured CPU priority,
    I/O priority, and CPU affinity settings.
-3. If the file has a gzip signature, creates `/opt/ota/wicimage`, extracts the
-   gzip-compressed tar archive there using libarchive, and searches the
-   extracted top-level files for one with an MBR signature. The compressed
-   input is removed after a matching image is found. An uncompressed input
-   must itself have an MBR signature.
-4. Creates mount and backup directories under `/opt/ota/extblock`, removes the
-   previous boot backup, and copies `/boot` to
-   `/opt/ota/extblock/old_boot_bkup`.
-5. Obtains a loop device for the image, enables partition scanning using
-   `LOOP_SET_STATUS64` with a populated `loop_info64` structure and
-   `LO_FLAGS_PARTSCAN`, and waits for the configured 200 ms stabilization
-   period. Configuration failures report the underlying system error.
-6. Marks the update as being in its critical phase. It mounts image partition
-   2 read-only as the new root filesystem, chooses the passive root filesystem
-   bank based on `/proc/cmdline`, mounts that bank, clears its existing
-   contents, and copies the image root filesystem to it.
-7. Mounts image partition 1 read-only as VFAT, clears `/boot`, and copies the
-   image boot contents there. It then replaces every occurrence of the active
-   bank path in `/boot/cmdline.txt` with the passive bank path. A command line
-   that already names only the passive bank is accepted. As in `FlashApp.sh`,
-   a boot mount failure aborts before the bank switch, and a boot copy or
-   command-line update failure restores `/boot` from the backup.
-8. Leaves the critical phase, reports the final status, and processes any
+3. Reads exactly one `root=` argument from `/proc/cmdline`; only
+   `/dev/mmcblk0p2` and `/dev/mmcblk0p3` are accepted. The other configured
+   bank is selected as the passive target. Missing, duplicate, or unsupported
+   root arguments fail closed.
+4. Unmounts every mount point of the passive bank (for example `/root2`, which
+   is mounted read-write at boot). Mounts are removed newest first with a normal
+   (non-lazy) unmount, and the pass repeats until the device is absent from
+   `/proc/self/mountinfo`. The running root filesystem is never unmounted. If
+   any mount point is busy, the update fails before anything is written. The
+   passive bank is not remounted; it is mounted again at the next boot.
+5. Backs up `/boot` to `/opt/ota/extblock/old_boot_bkup` before writing either
+   partition.
+6. Streams a raw `.wic` file or the single regular `.wic` member of a
+   `.wic.tar.gz` archive. It does not extract the full disk image. The primary
+   MBR or GPT partition table is bounds-checked; GPT header and entry-array
+   CRCs are verified. Extended and hybrid MBR layouts are rejected.
+7. Stages WIC partition 1 in a uniquely created file under `/run`, and writes
+   WIC partition 2 directly to the passive rootfs block device. The device is
+   opened exclusively without following symlinks, verified to be a block
+   device, checked against `/proc/self/mountinfo`, and sized with
+   `BLKGETSIZE64`. Any error in the size check or a partition that does not fit
+   aborts before the first block write. Target writes are checked for short,
+   zero-length, and failed writes, periodically flushed, and synchronized
+   before continuing.
+8. Drains the WIC entry and the complete archive to normal EOF, checking all
+   libarchive statuses so gzip/tar trailer errors abort the update. The
+   passive rootfs may already have been overwritten if corruption is detected
+   late, but `/boot/cmdline.txt` is not switched, so the active bank remains
+   selected. The OTA input is retained on failure and removed only after a
+   successful bank switch when it is gzip-compressed.
+9. Mounts the staged boot image read-only through a loop device, updates `/boot`
+   from it, then writes a temporary `cmdline.txt`, synchronizes it, and renames
+   it over the original. A boot update or bank-switch failure attempts to
+   restore `/boot` from the backup.
+10. Leaves the critical phase, reports the final status, and processes any
    deferred termination signal.
 
-Archive extraction must reach normal EOF and successfully write and finalize
-every entry. Reader/writer initialization, header, data, finalization, or close
-failures stop the update before loop setup or partition writes. The failure
-is logged with the libarchive status and diagnostic when available, and
-reader/writer resources are released on every exit path. Non-success
-libarchive statuses, including warnings, are treated as extraction failures.
-
-The configured banks are `/dev/mmcblk0p2` and `/dev/mmcblk0p3`. If
-`/proc/cmdline` contains bank A, bank B is selected as passive; otherwise bank
-A is selected.
+The WIC layout must contain primary partitions 1 (boot) and 2 (rootfs), and
+the WIC rootfs partition must fit in the passive device. The flasher does not
+run `resize2fs`; it writes the filesystem image as built. A `--size` value for
+a `--source rootfs` WIC partition is a minimum and may be increased by WIC's
+overhead factor. Use a fixed-size build setting if both banks must be exactly
+1024 MiB, and keep the runtime capacity check. Writing a filesystem image to
+the other bank duplicates its ext4 UUID and label; root selection must use the
+device path shown above rather than an ambiguous filesystem UUID or label.
 
 ## Resource Controls
 
-The processor applies resource settings directly to itself before extraction
+The processor applies resource settings directly to itself before streaming
 and copying:
 
 | Setting | Configuration | Effect intended by the code |
@@ -160,15 +166,13 @@ permissions, or unavailable CPUs do not by themselves abort the update.
 
 | Purpose | Configured value |
 | --- | --- |
-| Temporary OTA area | `/opt/ota` |
-| Extracted image directory | `/opt/ota/wicimage` |
 | Mount and backup root | `/opt/ota/extblock` |
 | Boot mount and backup | `/opt/ota/extblock/ota_boot`, `/opt/ota/extblock/old_boot_bkup` |
-| Root filesystem mounts | `/opt/ota/extblock/ota_rootfs`, `/opt/ota/extblock/target_rootfs` |
+| Staged WIC boot partition | Unique file under `/run` |
 | Boot files | `/boot`, `/boot/cmdline.txt` |
 | Loop device control | `/dev/loop-control`, with devices named `/dev/loop<N>` |
 | Lock file | `/var/run/flash_app.lock` |
-| Filesystems | `ext4` for rootfs, `vfat` for boot |
+| Mounted filesystem | `vfat` for the staged boot partition |
 
 The paths and CPU numbers are compile-time constants; this implementation
 does not read them from a runtime configuration file.
@@ -178,19 +182,22 @@ does not read them from a runtime configuration file.
 Outside the critical phase, a received signal invokes cleanup and exits. During
 the critical phase, the signal number is saved and termination is deferred
 until the phase ends; the saved signal is then processed after cleanup.
-Cleanup attempts to unmount all three mount paths, detach and close the loop
-device, release and remove the instance lock, remove the temporary OTA
-directories, and call `sync()`.
+Cleanup unmounts the staged boot partition, detaches and closes the loop
+device, removes the staged boot image after detaching it, releases the instance
+lock, and removes the temporary mount and backup directories. The lock file
+itself remains in place so concurrent invocations always lock the same inode.
 
 ## Implementation Notes
 
-- Filesystem errors during copying are caught and reported as
-  `mfrERR_WRITE_FLASH_FAILED`; the bank switch only happens after both the
-  root filesystem and boot updates succeed.
+- Filesystem errors during boot copying are caught and reported as
+  `mfrERR_WRITE_FLASH_FAILED`; the bank switch only happens after the raw
+  rootfs write and boot update succeed.
 - Failures during the update can leave a partially written passive root
   filesystem; cleanup releases resources but does not restore it. The active
   bank stays selected in that case.
-- The code uses C++17 filesystem operations, Linux loop-device, mount,
-  scheduling, and I/O-priority interfaces, and libarchive for gzip/tar
-  extraction. Availability of BusyBox utilities alone is not sufficient for
-  this native implementation.
+- Raw copying duplicates the ext4 UUID and label from the WIC root partition.
+  Avoid mounting either bank by that duplicated filesystem UUID or label.
+- The code uses C++17 filesystem operations, Linux block-device and
+  loop-device interfaces, mount, scheduling, and I/O-priority interfaces, and
+  libarchive for gzip/tar streaming. Availability of BusyBox utilities alone
+  is not sufficient for this native implementation.

@@ -19,8 +19,8 @@ The build produces `libRDKMfrLib.so`, `mfrHalUtility`, and `FlashApp`. The stage
 installation above places the library under `staging/usr/lib` and both
 executables under `staging/usr/bin`. The library retains the previous
 `libRDKMfrLib.so.0` SONAME and `0.0.0` library version.
-`FlashProcessor.hpp` and `FlashConfig.hpp`
-are header-only parts of `FlashApp`; they are not separate compilation units.
+`FlashProcessor.hpp` and `FlashConfig.hpp` are included by `FlashApp`;
+`WicStreamFlasher.cpp` is compiled into the executable.
 The shell wrapper is not installed by the build, matching the previous behavior.
 
 | CMake option | Default | Purpose |
