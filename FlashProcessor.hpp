@@ -468,6 +468,7 @@ public:
             cleanup();
             std::exit(m_deferred_signal_number.load());
         }
+        std::cout << FlashConfig::LOG_TAG << "Flashing process completed successfully." << std::endl;
         return true;
     }
 

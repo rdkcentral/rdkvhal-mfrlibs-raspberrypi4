@@ -47,10 +47,11 @@ find_package(Threads REQUIRED)
 
 # Add GIT version to the compile flags
 execute_process(
-    COMMAND git rev-parse --short HEAD
+    COMMAND git describe --tags --always --dirty
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     OUTPUT_VARIABLE GIT_SHA
     OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
 )
 
 if (NOT GIT_SHA STREQUAL "")
