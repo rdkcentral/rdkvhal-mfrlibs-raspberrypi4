@@ -62,6 +62,13 @@ signal number.
    `/boot/cmdline.txt` with the passive bank path.
 8. Leaves the critical phase and processes any deferred termination signal.
 
+Archive extraction must reach normal EOF and successfully write and finalize
+every entry. Reader/writer initialization, header, data, finalization, or close
+failures stop the update before loop setup or partition writes. The failure
+is logged with the libarchive status and diagnostic when available, and
+reader/writer resources are released on every exit path. Non-success
+libarchive statuses, including warnings, are treated as extraction failures.
+
 The configured banks are `/dev/mmcblk0p2` and `/dev/mmcblk0p3`. If
 `/proc/cmdline` contains bank A, bank B is selected as passive; otherwise bank
 A is selected.

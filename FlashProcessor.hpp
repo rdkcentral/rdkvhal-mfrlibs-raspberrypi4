@@ -27,6 +27,7 @@
 #include <fstream>
 #include <string>
 #include <filesystem>
+#include <memory>
 #include <chrono>
 #include <thread>
 #include <atomic>
@@ -64,6 +65,7 @@ private:
      */
     void apply_reduced_priority()
     {
+        std::cout << FlashConfig::LOG_TAG << "Applying reduced CPU and I/O priority, and pinning to cores 2 and 3." << std::endl;
         // 1. Reduce CPU priority natively (Equivalent to nice -n 10)
         ::setpriority(PRIO_PROCESS, 0, FlashConfig::CPU_NICE_LOW_PRIORITY);
 
@@ -88,12 +90,13 @@ private:
     {
         m_lock_file_descriptor = ::open(FlashConfig::INSTANCE_LOCK_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
         if (m_lock_file_descriptor < 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to open lock file: " << FlashConfig::INSTANCE_LOCK_FILE << std::endl;
             return false;
         }
         if (::flock(m_lock_file_descriptor, LOCK_EX | LOCK_NB) < 0) {
-            std::cerr << FlashConfig::LOG_TAG << "Instance active. Aborting." << std::endl;
             ::close(m_lock_file_descriptor);
             m_lock_file_descriptor = FlashConfig::INVALID_FILE_DESCRIPTOR;
+            std::cerr << FlashConfig::LOG_TAG << "Another instance of the application is already running. Exiting." << std::endl;
             return false;
         }
         return true;
@@ -108,6 +111,7 @@ private:
     {
         std::ifstream image_stream(image_path, std::ios::binary);
         if (!image_stream) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to open image file: " << image_path << std::endl;
             return false;
         }
         unsigned char gzip_header[FlashConfig::GZIP_HEADER_SIZE] = {0};
@@ -124,16 +128,20 @@ private:
      */
     bool has_mbr_signature(const std::string& image_path)
     {
+        bool has_signature = false;
         std::ifstream image_stream(image_path, std::ios::binary);
         if (!image_stream) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to open image file: " << image_path << std::endl;
             return false;
         }
         image_stream.seekg(FlashConfig::MBR_SIGNATURE_OFFSET, std::ios::beg);
         unsigned char mbr_signature[FlashConfig::MBR_SIGNATURE_SIZE] = {0};
         image_stream.read(reinterpret_cast<char*>(mbr_signature), FlashConfig::MBR_SIGNATURE_SIZE);
-        return (image_stream.gcount() == FlashConfig::MBR_SIGNATURE_SIZE &&
+        has_signature = (image_stream.gcount() == FlashConfig::MBR_SIGNATURE_SIZE &&
                 mbr_signature[0] == FlashConfig::MBR_SIGNATURE_BYTE_1 &&
                 mbr_signature[1] == FlashConfig::MBR_SIGNATURE_BYTE_2);
+        std::cout << FlashConfig::LOG_TAG << "Image file " << image_path << (has_signature ? " has a valid MBR signature." : " does not have a valid MBR signature.") << std::endl;
+        return has_signature;
     }
 
     /**
@@ -144,34 +152,103 @@ private:
      */
     bool unpack_archive(const std::string& archive_path, const std::string& destination_directory)
     {
-        struct archive* archive_reader = archive_read_new();
-        struct archive* archive_writer = archive_write_disk_new();
-        archive_write_disk_set_options(archive_writer, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM);
-        archive_read_support_filter_gzip(archive_reader); archive_read_support_format_tar(archive_reader);
-        if (archive_read_open_filename(archive_reader, archive_path.c_str(), FlashConfig::ARCHIVE_READ_BLOCK_SIZE) != ARCHIVE_OK) {
-            archive_read_free(archive_reader);
-            archive_write_free(archive_writer);
+        std::unique_ptr<struct archive, decltype(&archive_read_free)> archive_reader(archive_read_new(), archive_read_free);
+        std::unique_ptr<struct archive, decltype(&archive_write_free)> archive_writer(archive_write_disk_new(), archive_write_free);
+        if (!archive_reader || !archive_writer) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to allocate archive reader or writer: " << archive_path << std::endl;
             return false;
         }
+
+        const auto log_archive_error = [&archive_path](struct archive* archive_handle, const char* operation, auto archive_status) {
+            std::cerr << FlashConfig::LOG_TAG << operation << ": " << archive_path << " (status " << archive_status;
+            const char* error_message = archive_error_string(archive_handle);
+            if (error_message) {
+                std::cerr << ", " << error_message;
+            }
+            std::cerr << ")" << std::endl;
+        };
+
+        int archive_status = archive_write_disk_set_options(archive_writer.get(), ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM);
+        if (archive_status != ARCHIVE_OK) {
+            log_archive_error(archive_writer.get(), "Failed to configure archive extraction", archive_status);
+            return false;
+        }
+        archive_status = archive_read_support_filter_gzip(archive_reader.get());
+        if (archive_status != ARCHIVE_OK) {
+            log_archive_error(archive_reader.get(), "Failed to enable GZIP support", archive_status);
+            return false;
+        }
+        archive_status = archive_read_support_format_tar(archive_reader.get());
+        if (archive_status != ARCHIVE_OK) {
+            log_archive_error(archive_reader.get(), "Failed to enable TAR support", archive_status);
+            return false;
+        }
+        archive_status = archive_read_open_filename(archive_reader.get(), archive_path.c_str(), FlashConfig::ARCHIVE_READ_BLOCK_SIZE);
+        if (archive_status != ARCHIVE_OK) {
+            log_archive_error(archive_reader.get(), "Failed to open archive", archive_status);
+            return false;
+        }
+
         struct archive_entry* archive_entry;
-        int archive_status = ARCHIVE_OK;
-        while (archive_read_next_header(archive_reader, &archive_entry) == ARCHIVE_OK) {
+        while (true) {
+            archive_status = archive_read_next_header(archive_reader.get(), &archive_entry);
+            if (archive_status == ARCHIVE_EOF) {
+                break;
+            }
+            if (archive_status != ARCHIVE_OK) {
+                log_archive_error(archive_reader.get(), "Failed to read archive entry header", archive_status);
+                return false;
+            }
             fs::path extracted_entry_path = fs::path(destination_directory) / archive_entry_pathname(archive_entry);
             archive_entry_set_pathname(archive_entry, extracted_entry_path.c_str());
-            archive_status = archive_write_header(archive_writer, archive_entry);
-            if (archive_status >= ARCHIVE_OK && archive_entry_size(archive_entry) > 0) {
+            archive_status = archive_write_header(archive_writer.get(), archive_entry);
+            if (archive_status != ARCHIVE_OK) {
+                log_archive_error(archive_writer.get(), "Failed to write archive entry header", archive_status);
+                return false;
+            }
+            if (archive_entry_size(archive_entry) > 0) {
                 const void* data_block;
                 size_t data_block_size;
                 la_int64_t data_block_offset;
-                while (archive_read_data_block(archive_reader, &data_block, &data_block_size, &data_block_offset) == ARCHIVE_OK) {
-                    if (archive_write_data_block(archive_writer, data_block, data_block_size, data_block_offset) != ARCHIVE_OK) break;
+                while (true) {
+                    archive_status = archive_read_data_block(archive_reader.get(), &data_block, &data_block_size, &data_block_offset);
+                    if (archive_status == ARCHIVE_EOF) {
+                        break;
+                    }
+                    if (archive_status != ARCHIVE_OK) {
+                        log_archive_error(archive_reader.get(), "Failed to read archive entry data", archive_status);
+                        return false;
+                    }
+                    const auto write_status = archive_write_data_block(archive_writer.get(), data_block, data_block_size, data_block_offset);
+                    if (write_status != ARCHIVE_OK) {
+                        log_archive_error(archive_writer.get(), "Failed to write archive entry data", write_status);
+                        return false;
+                    }
                 }
             }
-            archive_write_finish_entry(archive_writer);
+            archive_status = archive_write_finish_entry(archive_writer.get());
+            if (archive_status != ARCHIVE_OK) {
+                log_archive_error(archive_writer.get(), "Failed to finish archive entry", archive_status);
+                return false;
+            }
         }
-        archive_read_close(archive_reader); archive_read_free(archive_reader);
-        archive_write_close(archive_writer); archive_write_free(archive_writer);
-        return (archive_status == ARCHIVE_OK);
+
+        bool extraction_complete = true;
+        archive_status = archive_read_close(archive_reader.get());
+        if (archive_status != ARCHIVE_OK) {
+            log_archive_error(archive_reader.get(), "Failed to close archive reader", archive_status);
+            extraction_complete = false;
+        }
+        archive_status = archive_write_close(archive_writer.get());
+        if (archive_status != ARCHIVE_OK) {
+            log_archive_error(archive_writer.get(), "Failed to close archive writer", archive_status);
+            extraction_complete = false;
+        }
+        if (!extraction_complete) {
+            return false;
+        }
+        std::cout << FlashConfig::LOG_TAG << "Successfully unpacked archive: " << archive_path << " to directory: " << destination_directory << std::endl;
+        return true;
     }
 
     /**
@@ -183,23 +260,28 @@ private:
     {
         m_loop_control_file_descriptor = ::open(FlashConfig::LOOP_CONTROL_DEVICE, O_RDWR);
         if (m_loop_control_file_descriptor < 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to open loop control device: " << FlashConfig::LOOP_CONTROL_DEVICE << std::endl;
             return false;
         }
         int loop_device_number = ::ioctl(m_loop_control_file_descriptor, LOOP_CTL_GET_FREE);
         if (loop_device_number < 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to get free loop device number." << std::endl;
             return false;
         }
         m_loop_device_path = std::string(FlashConfig::LOOP_DEVICE_PREFIX) + std::to_string(loop_device_number);
         m_loop_device_file_descriptor = ::open(m_loop_device_path.c_str(), O_RDWR);
         if (m_loop_device_file_descriptor < 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to open loop device: " << m_loop_device_path << std::endl;
             return false;
         }
         int image_file_descriptor = ::open(image_path.c_str(), O_RDONLY);
         if (image_file_descriptor < 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to open image file: " << image_path << std::endl;
             return false;
         }
         if (::ioctl(m_loop_device_file_descriptor, LOOP_SET_FD, image_file_descriptor) < 0) {
             ::close(image_file_descriptor);
+            std::cerr << FlashConfig::LOG_TAG << "Failed to associate image file with loop device: " << m_loop_device_path << std::endl;
             return false;
         }
         ::close(image_file_descriptor);
@@ -256,6 +338,7 @@ public:
             m_has_deferred_signal.store(true, std::memory_order_release);
             m_deferred_signal_number.store(signal_number, std::memory_order_release);
         } else {
+            std::cout << FlashConfig::LOG_TAG << "Termination signal (" << signal_number << ") received. Cleaning up and exiting." << std::endl;
             cleanup(); std::exit(signal_number);
         }
     }
@@ -268,7 +351,12 @@ public:
      */
     bool flash()
     {
-        if (!lock_instance() || !fs::exists(m_image_path)) {
+        if (!lock_instance()) {
+            return false;
+        }
+
+        if (!fs::exists(m_image_path)) {
+            std::cerr << FlashConfig::LOG_TAG << "Image file does not exist: " << m_image_path << std::endl;
             return false;
         }
 
@@ -276,8 +364,10 @@ public:
         apply_reduced_priority();
 
         if (is_gzip_archive(m_image_path)) {
+            std::cout << FlashConfig::LOG_TAG << "Image file is a GZIP archive. Unpacking..." << std::endl;
             fs::create_directories(FlashConfig::EXTRACTED_IMAGE_DIRECTORY);
             if (!unpack_archive(m_image_path, FlashConfig::EXTRACTED_IMAGE_DIRECTORY)) {
+                std::cerr << FlashConfig::LOG_TAG << "Failed to unpack GZIP archive: " << m_image_path << std::endl;
                 return false;
             }
             std::string extracted_disk_image_path;
@@ -288,6 +378,7 @@ public:
                 }
             }
             if (extracted_disk_image_path.empty()) {
+                std::cerr << FlashConfig::LOG_TAG << "No valid disk image with MBR signature found in unpacked archive." << std::endl;
                 return false;
             }
             fs::remove(m_image_path);
@@ -301,6 +392,8 @@ public:
         fs::remove_all(FlashConfig::BOOT_BACKUP_DIRECTORY);
         copy_tree(FlashConfig::BOOT_DIRECTORY, FlashConfig::BOOT_BACKUP_DIRECTORY);
         if (!setup_loop_device(m_image_path)) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to set up loop device for image: " << m_image_path << std::endl;
+            cleanup();
             return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(FlashConfig::LOOP_DEVICE_STABILIZATION_DELAY_MS));
@@ -311,16 +404,19 @@ public:
         if (::mount(image_rootfs_partition.c_str(),
                     FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY,
                     FlashConfig::EXT4_FILESYSTEM_TYPE, MS_RDONLY, nullptr) != 0) {
-            m_is_critical_update_phase.store(false, std::memory_order_release); {
-                return false;
-            }
+            m_is_critical_update_phase.store(false, std::memory_order_release);
+            std::cerr << FlashConfig::LOG_TAG << "Failed to mount image root filesystem partition: " << image_rootfs_partition << std::endl;
+            cleanup();
+            return false;
         }
         std::string passive_rootfs_device = get_passive_rootfs_device();
+        std::cout << FlashConfig::LOG_TAG << "Passive root filesystem determined: " << passive_rootfs_device << std::endl;
         if (::mount(passive_rootfs_device.c_str(),
                     FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY,
                     FlashConfig::EXT4_FILESYSTEM_TYPE, 0, nullptr) != 0) {
             ::umount(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY);
             m_is_critical_update_phase.store(false, std::memory_order_release);
+            std::cerr << FlashConfig::LOG_TAG << "Failed to mount passive root filesystem device: " << passive_rootfs_device << std::endl;
             return false;
         }
         for (auto& directory_entry : fs::directory_iterator(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY)) {
