@@ -23,11 +23,47 @@
 
 #include "FlashProcessor.hpp"
 #include <csignal>
+#include <charconv>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
 #include <memory>
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <system_error>
 
 #include "mfrTypes.h"
 
-std::unique_ptr<NativeFlashProcessor> flash_processor = nullptr;
+std::unique_ptr<NativeFlashProcessor> flash_processor;
+
+constexpr std::string_view upgrade_progress_name(mfrUpgradeProgress_t progress) noexcept
+{
+    switch (progress) {
+        case mfrUPGRADE_PROGRESS_NOT_STARTED: return "NOT_STARTED";
+        case mfrUPGRADE_PROGRESS_STARTED:     return "STARTED";
+        case mfrUPGRADE_PROGRESS_ABORTED:     return "ABORTED";
+        case mfrUPGRADE_PROGRESS_VERIFYING:   return "VERIFYING";
+        case mfrUPGRADE_PROGRESS_FLASHING:    return "FLASHING";
+        case mfrUPGRADE_PROGRESS_REBOOTING:   return "REBOOTING";
+        case mfrUPGRADE_PROGRESS_COMPLETED:   return "COMPLETED";
+        default:                              return "UNKNOWN";
+    }
+}
+
+bool parse_notification_interval(std::string_view value, int& interval) noexcept
+{
+    if (value.empty()) {
+        return false;
+    }
+    int parsed_interval = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed_interval);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || parsed_interval < 0) {
+        return false;
+    }
+    interval = parsed_interval;
+    return true;
+}
 
 /**
  * @brief Signal handler for the flashing process.
@@ -55,8 +91,8 @@ int main(int argument_count, char* argument_values[])
 #endif
     std::string ota_image_path;
 
-    if (argument_count >= 3) {
-        ota_image_path = (fs::path(argument_values[1]) / argument_values[2]).string();
+    if (argument_count == 3 || argument_count == 4) {
+        ota_image_path = (std::filesystem::path(argument_values[1]) / argument_values[2]).string();
     } else if (argument_count == 2) {
         ota_image_path = argument_values[1];
     } else {
@@ -68,13 +104,10 @@ int main(int argument_count, char* argument_values[])
 
     int notify_interval_seconds = FlashConfig::STATUS_NOTIFY_INTERVAL_SECONDS;
     if (argument_count == 4) {
-        try {
-            notify_interval_seconds = std::stoi(argument_values[3]);
-            if (notify_interval_seconds < 0) {
-                notify_interval_seconds = FlashConfig::STATUS_NOTIFY_INTERVAL_SECONDS;
-            }
-        } catch (const std::exception& exception) {
-            notify_interval_seconds = FlashConfig::STATUS_NOTIFY_INTERVAL_SECONDS;
+        if (!parse_notification_interval(argument_values[3], notify_interval_seconds)) {
+            std::cerr << FlashConfig::LOG_TAG << "Notification interval must be a non-negative integer: "
+                      << argument_values[3] << std::endl;
+            return 1;
         }
     }
 
@@ -86,16 +119,18 @@ int main(int argument_count, char* argument_values[])
     std::signal(SIGHUP,  signal_handler);
 
     mfrUpgradeStatusNotify_t notify {};
+    notify.interval = notify_interval_seconds;
     notify.cbData = nullptr;
     notify.cb = [](mfrUpgradeStatus_t *status) {
         if (status) {
-            std::cout << FlashConfig::LOG_TAG << "Upgrade status: progress " << status->progress
-                      << ", error " << status->error
-                      << ", error string '" << status->error_string << "'"
-                      << ", percentage " << status->percentage << "%" << std::endl;
+            std::cout << FlashConfig::LOG_TAG
+                      << "Upgrade status: " << std::left << std::setw(16) << upgrade_progress_name(status->progress)
+                      << " (" << status->progress << ")"
+                      << ", percentage:" << std::right << std::setw(3) << status->percentage << "%"
+                      << ", error:" << status->error
+                      << ", error string:'" << status->error_string << "'" << std::endl;
         }
     };
-    notify.interval = notify_interval_seconds;
 
     flash_processor = std::make_unique<NativeFlashProcessor>(ota_image_path);
     return (flash_processor->flash(notify) == mfrERR_NONE) ? 0 : 1;

@@ -28,14 +28,20 @@
 #include <string>
 #include <filesystem>
 #include <memory>
+#include <algorithm>
+#include <array>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <iterator>
 #include <chrono>
 #include <thread>
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <system_error>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/mount.h>
@@ -54,18 +60,21 @@ namespace fs = std::filesystem;
 
 /**
  * @brief Reports mfrWriteImage() style upgrade status through mfrUpgradeStatusNotify_t.
- * While running, notify.cb receives mfrUPGRADE_PROGRESS_STARTED every notify.interval seconds
- * (no periodic callbacks when interval is 0). finish() always delivers exactly one final
+ * Phase changes are reported immediately, with the current phase and percentage repeated
+ * every notify.interval seconds. An interval of 0 reports only the final result.
+ * finish() always delivers exactly one final
  * mfrUPGRADE_PROGRESS_COMPLETED or mfrUPGRADE_PROGRESS_ABORTED callback.
  */
 class UpgradeStatusReporter {
 private:
     const mfrUpgradeStatusNotify_t m_notify;
     std::mutex m_mutex;
+    std::mutex m_callback_mutex;
     std::condition_variable m_stop_condition;
     std::thread m_periodic_thread;
     bool m_stop_requested = false;
     bool m_is_finished = false;
+    mfrUpgradeProgress_t m_progress = mfrUPGRADE_PROGRESS_NOT_STARTED;
     int m_percentage = 0;
 
     void deliver(mfrUpgradeProgress_t progress, mfrError_t error, const std::string& error_string, int percentage)
@@ -78,13 +87,28 @@ private:
         m_notify.cb(&status);
     }
 
+    void report_current_status()
+    {
+        std::lock_guard<std::mutex> callback_lock(m_callback_mutex);
+        mfrUpgradeProgress_t progress;
+        int percentage;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_stop_requested) {
+                return;
+            }
+            progress = m_progress;
+            percentage = m_percentage;
+        }
+        deliver(progress, mfrERR_NONE, "", percentage);
+    }
+
     void report_periodically()
     {
         std::unique_lock<std::mutex> lock(m_mutex);
         while (!m_stop_condition.wait_for(lock, std::chrono::seconds(m_notify.interval), [this] { return m_stop_requested; })) {
-            const int percentage = m_percentage;
             lock.unlock();
-            deliver(mfrUPGRADE_PROGRESS_STARTED, mfrERR_NONE, "", percentage);
+            report_current_status();
             lock.lock();
         }
     }
@@ -114,23 +138,65 @@ public:
     UpgradeStatusReporter(const UpgradeStatusReporter&) = delete;
     UpgradeStatusReporter& operator=(const UpgradeStatusReporter&) = delete;
 
+    void set_phase(mfrUpgradeProgress_t progress, int percentage)
+    {
+        // Serialize phase changes with periodic callbacks so an old phase cannot arrive later.
+        std::lock_guard<std::mutex> callback_lock(m_callback_mutex);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_stop_requested) {
+                return;
+            }
+            m_progress = progress;
+            m_percentage = std::max(m_percentage, std::clamp(percentage, 0, 99));
+            percentage = m_percentage;
+        }
+        if (m_notify.cb && m_notify.interval > 0) {
+            deliver(progress, mfrERR_NONE, "", percentage);
+        }
+    }
+
     void set_percentage(int percentage)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_percentage = percentage;
+        if (!m_stop_requested) {
+            m_percentage = std::max(m_percentage, std::clamp(percentage, 0, 99));
+        }
+    }
+
+    void set_byte_progress(std::uintmax_t completed_bytes, std::uintmax_t total_bytes,
+                           int start_percentage, int end_percentage)
+    {
+        if (total_bytes == 0) {
+            return;
+        }
+        const long double fraction = static_cast<long double>(std::min(completed_bytes, total_bytes)) /
+                                     static_cast<long double>(total_bytes);
+        const int percentage = start_percentage + static_cast<int>(fraction * (end_percentage - start_percentage));
+        // Reserve the endpoint until the operation has also finalized successfully.
+        set_percentage(std::min(percentage, end_percentage - 1));
     }
 
     void finish(mfrError_t error, const std::string& error_string)
     {
         stop_periodic_reports();
-        if (m_is_finished || !m_notify.cb) {
+        std::lock_guard<std::mutex> callback_lock(m_callback_mutex);
+        int percentage;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_is_finished) {
+                return;
+            }
+            m_is_finished = true;
+            percentage = m_percentage;
+        }
+        if (!m_notify.cb) {
             return;
         }
-        m_is_finished = true;
         if (error == mfrERR_NONE) {
             deliver(mfrUPGRADE_PROGRESS_COMPLETED, mfrERR_NONE, "", 100);
         } else {
-            deliver(mfrUPGRADE_PROGRESS_ABORTED, error, error_string, m_percentage);
+            deliver(mfrUPGRADE_PROGRESS_ABORTED, error, error_string, percentage);
         }
     }
 };
@@ -238,10 +304,13 @@ private:
      * @brief Unpack a GZIP archive to the specified destination directory using libarchive.
      * @param archive_path The path to the GZIP archive.
      * @param destination_directory The directory where the archive contents will be extracted.
+     * @param status_reporter Receives progress based on compressed bytes consumed.
      * @return true if the extraction was successful, false otherwise.
      */
-    bool unpack_archive(const std::string& archive_path, const std::string& destination_directory)
+    bool unpack_archive(const std::string& archive_path, const std::string& destination_directory,
+                        UpgradeStatusReporter& status_reporter)
     {
+        const std::uintmax_t archive_size = fs::file_size(archive_path);
         std::unique_ptr<struct archive, decltype(&archive_read_free)> archive_reader(archive_read_new(), archive_read_free);
         std::unique_ptr<struct archive, decltype(&archive_write_free)> archive_writer(archive_write_disk_new(), archive_write_free);
         if (!archive_reader || !archive_writer) {
@@ -314,6 +383,12 @@ private:
                         log_archive_error(archive_writer.get(), "Failed to write archive entry data", write_status);
                         return false;
                     }
+                    const auto compressed_bytes_read = archive_filter_bytes(archive_reader.get(), -1);
+                    if (compressed_bytes_read < 0) {
+                        std::cerr << FlashConfig::LOG_TAG << "Failed to read archive byte count: " << archive_path << std::endl;
+                        return false;
+                    }
+                    status_reporter.set_byte_progress(static_cast<std::uintmax_t>(compressed_bytes_read), archive_size, 0, 30);
                 }
             }
             archive_status = archive_write_finish_entry(archive_writer.get());
@@ -337,6 +412,7 @@ private:
         if (!extraction_complete) {
             return false;
         }
+        status_reporter.set_percentage(30);
         std::cout << FlashConfig::LOG_TAG << "Successfully unpacked archive: " << archive_path << " to directory: " << destination_directory << std::endl;
         return true;
     }
@@ -402,34 +478,115 @@ private:
         return FlashConfig::ROOTFS_BANK_A_DEVICE;
     }
 
+    std::uintmax_t get_tree_size(const fs::path& source_path)
+    {
+        if (fs::is_directory(source_path)) {
+            std::uintmax_t total_bytes = 0;
+            for (const auto& directory_entry : fs::directory_iterator(source_path)) {
+                total_bytes += get_tree_size(directory_entry.path());
+            }
+            return total_bytes;
+        }
+        return fs::is_regular_file(source_path) ? fs::file_size(source_path) : 0;
+    }
+
+    void copy_file_with_progress(const fs::path& source_path, const fs::path& destination_path,
+                                 const std::function<void(std::uintmax_t)>& report_copied_bytes)
+    {
+        if (fs::exists(destination_path) && fs::equivalent(source_path, destination_path)) {
+            throw fs::filesystem_error("Copy source and destination are the same file", source_path, destination_path,
+                                       std::make_error_code(std::errc::file_exists));
+        }
+        if (fs::exists(destination_path) && !fs::is_regular_file(destination_path)) {
+            throw fs::filesystem_error("Copy destination is not a regular file", source_path, destination_path,
+                                       std::make_error_code(std::errc::invalid_argument));
+        }
+        std::ifstream source_stream(source_path, std::ios::binary);
+        if (!source_stream) {
+            throw fs::filesystem_error("Failed to open copy source", source_path, destination_path,
+                                       std::make_error_code(std::errc::io_error));
+        }
+        std::ofstream destination_stream(destination_path, std::ios::binary | std::ios::trunc);
+        if (!destination_stream) {
+            throw fs::filesystem_error("Failed to open copy destination", source_path, destination_path,
+                                       std::make_error_code(std::errc::io_error));
+        }
+        std::array<char, FlashConfig::FILE_COPY_BLOCK_SIZE> buffer;
+        while (source_stream) {
+            source_stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            if (source_stream.bad() || (source_stream.fail() && !source_stream.eof())) {
+                throw fs::filesystem_error("Failed to read copy source", source_path, destination_path,
+                                           std::make_error_code(std::errc::io_error));
+            }
+            const auto copied_bytes = source_stream.gcount();
+            if (copied_bytes > 0) {
+                destination_stream.write(buffer.data(), copied_bytes);
+                if (!destination_stream) {
+                    throw fs::filesystem_error("Failed to write copy destination", source_path, destination_path,
+                                               std::make_error_code(std::errc::io_error));
+                }
+                report_copied_bytes(static_cast<std::uintmax_t>(copied_bytes));
+            }
+        }
+        destination_stream.close();
+        if (!destination_stream) {
+            throw fs::filesystem_error("Failed to close copy destination", source_path, destination_path,
+                                       std::make_error_code(std::errc::io_error));
+        }
+        fs::permissions(destination_path, fs::status(source_path).permissions());
+    }
+
     /**
      * @brief Recursively copy the contents of a source directory to a destination directory.
      * If the source is a file, it will be copied directly to the destination.
      * @param source_path The path to the source directory or file.
      * @param destination_path The path to the destination directory.
+     * @param report_copied_bytes Optional callback receiving each copied block's byte count.
      */
-    void copy_tree(const fs::path& source_path, const fs::path& destination_path)
+    void copy_tree(const fs::path& source_path, const fs::path& destination_path,
+                   const std::function<void(std::uintmax_t)>& report_copied_bytes = {})
     {
         if (fs::is_directory(source_path)) {
             fs::create_directories(destination_path);
             for (auto& directory_entry : fs::directory_iterator(source_path)) {
-                copy_tree(directory_entry.path(), destination_path / directory_entry.path().filename());
+                copy_tree(directory_entry.path(), destination_path / directory_entry.path().filename(), report_copied_bytes);
             }
         } else if (fs::is_regular_file(source_path)) {
-            fs::copy_file(source_path, destination_path, fs::copy_options::overwrite_existing);
+            if (report_copied_bytes) {
+                copy_file_with_progress(source_path, destination_path, report_copied_bytes);
+            } else {
+                fs::copy_file(source_path, destination_path, fs::copy_options::overwrite_existing);
+            }
         }
+    }
+
+    void copy_tree_with_progress(const fs::path& source_path, const fs::path& destination_path,
+                                 UpgradeStatusReporter& status_reporter, int start_percentage, int end_percentage)
+    {
+        const std::uintmax_t total_bytes = get_tree_size(source_path);
+        std::uintmax_t copied_bytes = 0;
+        copy_tree(source_path, destination_path, [&](std::uintmax_t bytes) {
+            copied_bytes += bytes;
+            status_reporter.set_byte_progress(copied_bytes, total_bytes, start_percentage, end_percentage);
+        });
+        status_reporter.set_percentage(end_percentage);
     }
 
     /**
      * @brief Replace the contents of the boot directory with the provided source directory.
      * @param source_directory The directory whose contents will be copied into the boot directory.
+     * @param status_reporter Optional progress reporter; omitted when restoring the backup.
      */
-    void replace_boot_contents(const fs::path& source_directory)
+    void replace_boot_contents(const fs::path& source_directory, UpgradeStatusReporter* status_reporter = nullptr)
     {
         for (auto& directory_entry : fs::directory_iterator(FlashConfig::BOOT_DIRECTORY)) {
             fs::remove_all(directory_entry.path());
         }
-        copy_tree(source_directory, FlashConfig::BOOT_DIRECTORY);
+        if (status_reporter) {
+            copy_tree_with_progress(source_directory, FlashConfig::BOOT_DIRECTORY, *status_reporter, 80, 90);
+        } else {
+            copy_tree(source_directory, FlashConfig::BOOT_DIRECTORY);
+        }
         ::sync();
     }
 
@@ -498,7 +655,7 @@ private:
 
     /**
      * @brief Run the flashing steps after the instance lock and image existence checks.
-     * @param status_reporter Receives the progress percentage of each completed step.
+     * @param status_reporter Receives phase changes and measured work progress.
      * @param failure_reason Set to a short description when a step fails.
      * @return mfrERR_NONE on success, otherwise the error describing the failed step.
      */
@@ -511,15 +668,15 @@ private:
 
         // Apply CPU, IO, and core affinity constraints natively before doing heavy lifting
         apply_reduced_priority();
+        status_reporter.set_phase(mfrUPGRADE_PROGRESS_VERIFYING, 0);
 
         if (is_gzip_archive(m_image_path)) {
             std::cout << FlashConfig::LOG_TAG << "Image file is a GZIP archive. Unpacking..." << std::endl;
             fs::create_directories(FlashConfig::EXTRACTED_IMAGE_DIRECTORY);
-            if (!unpack_archive(m_image_path, FlashConfig::EXTRACTED_IMAGE_DIRECTORY)) {
+            if (!unpack_archive(m_image_path, FlashConfig::EXTRACTED_IMAGE_DIRECTORY, status_reporter)) {
                 std::cerr << FlashConfig::LOG_TAG << "Failed to unpack GZIP archive: " << m_image_path << std::endl;
                 return fail(mfrERR_SRC_FILE_ERROR, "Archive unpack failed");
             }
-            status_reporter.set_percentage(30);
             std::string extracted_disk_image_path;
             for (auto& directory_entry : fs::directory_iterator(FlashConfig::EXTRACTED_IMAGE_DIRECTORY)) {
                 if (directory_entry.is_regular_file() && has_mbr_signature(directory_entry.path().string())) {
@@ -543,7 +700,7 @@ private:
         fs::create_directories(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
         fs::remove_all(FlashConfig::BOOT_BACKUP_DIRECTORY);
         fs::create_directories(FlashConfig::BOOT_BACKUP_DIRECTORY);
-        copy_tree(FlashConfig::BOOT_DIRECTORY, FlashConfig::BOOT_BACKUP_DIRECTORY);
+        copy_tree_with_progress(FlashConfig::BOOT_DIRECTORY, FlashConfig::BOOT_BACKUP_DIRECTORY, status_reporter, 35, 40);
         if (!setup_loop_device(m_image_path)) {
             std::cerr << FlashConfig::LOG_TAG << "Failed to set up loop device for image: " << m_image_path << std::endl;
             return fail(mfrERR_SRC_FILE_ERROR, "Loop device setup failed");
@@ -570,11 +727,12 @@ private:
                       << ": " << std::strerror(errno) << std::endl;
             return fail(mfrERR_WRITE_FLASH_FAILED, "Passive rootfs mount failed");
         }
-        status_reporter.set_percentage(45);
+        status_reporter.set_phase(mfrUPGRADE_PROGRESS_FLASHING, 45);
         for (auto& directory_entry : fs::directory_iterator(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY)) {
             fs::remove_all(directory_entry.path());
         }
-        copy_tree(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY, FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
+        copy_tree_with_progress(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY, FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY,
+                                status_reporter, 45, 80);
         ::sync();
         ::umount(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
         ::umount(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY);
@@ -591,7 +749,7 @@ private:
             return fail(mfrERR_BAD_IMAGE_HEADER, "Image boot mount failed");
         }
         try {
-            replace_boot_contents(FlashConfig::BOOT_MOUNT_DIRECTORY);
+            replace_boot_contents(FlashConfig::BOOT_MOUNT_DIRECTORY, &status_reporter);
         } catch (const std::exception& exception) {
             std::cerr << FlashConfig::LOG_TAG << "Failed to update " << FlashConfig::BOOT_DIRECTORY << ": " << exception.what() << std::endl;
             ::umount(FlashConfig::BOOT_MOUNT_DIRECTORY);
@@ -608,12 +766,13 @@ private:
             restore_boot_backup();
             return fail(mfrERR_UPDATE_BOOT_PARAMS_FAILED, "Boot cmdline update failed");
         }
+        status_reporter.set_percentage(99);
         return mfrERR_NONE;
     }
 
 public:
     explicit NativeFlashProcessor(const std::string& image_path) : m_image_path(image_path) {}
-    ~NativeFlashProcessor() { cleanup(); }
+    ~NativeFlashProcessor() noexcept { cleanup(); }
 
     /**
      * @brief Handle termination signals (SIGINT, SIGTERM, SIGHUP).
@@ -636,26 +795,44 @@ public:
      * @brief Perform the flashing process.
      * This function handles the entire flashing process, including unpacking the image if it's a GZIP archive,
      * setting up loop devices, mounting partitions, copying files, and updating the boot command line.
-     * Follows the mfrWriteImage() contract: errors detected before flashing starts are returned without
-     * invoking notify.cb; once started, notify.cb receives periodic mfrUPGRADE_PROGRESS_STARTED updates
-     * (every notify.interval seconds, if non-zero) and one final mfrUPGRADE_PROGRESS_COMPLETED or
-     * mfrUPGRADE_PROGRESS_ABORTED status. The call blocks until flashing finishes.
+     * Errors detected before flashing starts are returned without invoking notify.cb.
+     * With a positive interval, notify.cb reports NOT_STARTED, STARTED, VERIFYING, and FLASHING,
+     * followed by COMPLETED or ABORTED. Periodic callbacks report the current phase and measured
+     * percentage. An interval of 0 reports only the final result. The call blocks until flashing finishes.
      * @param notify The upgrade status callback configuration.
      * @return mfrERR_NONE if the flashing process was successful, otherwise the mfrError_t describing the failure.
      */
     mfrError_t flash(const mfrUpgradeStatusNotify_t& notify)
     {
+        if (notify.interval < 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Notification interval cannot be negative." << std::endl;
+            return mfrERR_INVALID_PARAM;
+        }
         if (!lock_instance()) {
             return mfrERR_OPERATION_NOT_SUPPORTED;
         }
 
         std::error_code exists_error;
-        if (!fs::exists(m_image_path, exists_error)) {
-            std::cerr << FlashConfig::LOG_TAG << "Image file does not exist: " << m_image_path << std::endl;
+        const bool image_exists = fs::exists(m_image_path, exists_error);
+        if (exists_error || !image_exists) {
+            std::cerr << FlashConfig::LOG_TAG << "Cannot access image file " << m_image_path;
+            if (exists_error) {
+                std::cerr << ": " << exists_error.message();
+            } else {
+                std::cerr << ": file does not exist";
+            }
+            std::cerr << std::endl;
+            return mfrERR_IMAGE_FILE_OPEN_FAILED;
+        }
+        std::error_code type_error;
+        if (!fs::is_regular_file(m_image_path, type_error) || type_error) {
+            std::cerr << FlashConfig::LOG_TAG << "Image path is not a regular file: " << m_image_path << std::endl;
             return mfrERR_IMAGE_FILE_OPEN_FAILED;
         }
 
         UpgradeStatusReporter status_reporter(notify);
+        status_reporter.set_phase(mfrUPGRADE_PROGRESS_NOT_STARTED, 0);
+        status_reporter.set_phase(mfrUPGRADE_PROGRESS_STARTED, 0);
         std::string failure_reason;
         mfrError_t flash_result = mfrERR_NONE;
         try {
@@ -688,7 +865,7 @@ public:
      * @brief Perform cleanup operations, including unmounting directories, releasing loop devices,
      * closing file descriptors, and removing temporary files and directories.
      */
-    void cleanup()
+    void cleanup() noexcept
     {
         ::umount(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
         ::umount(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY);
@@ -706,10 +883,22 @@ public:
             ::flock(m_lock_file_descriptor, LOCK_UN);
             ::close(m_lock_file_descriptor);
             m_lock_file_descriptor = FlashConfig::INVALID_FILE_DESCRIPTOR;
-            fs::remove(FlashConfig::INSTANCE_LOCK_FILE);
+            std::error_code remove_error;
+            fs::remove(FlashConfig::INSTANCE_LOCK_FILE, remove_error);
+            if (remove_error) {
+                std::cerr << FlashConfig::LOG_TAG << "Failed to remove lock file: " << remove_error.message() << std::endl;
+            }
         }
-        fs::remove_all(FlashConfig::TEMPORARY_MOUNT_ROOT);
-        fs::remove_all(FlashConfig::EXTRACTED_IMAGE_DIRECTORY);
+        std::error_code remove_error;
+        fs::remove_all(FlashConfig::TEMPORARY_MOUNT_ROOT, remove_error);
+        if (remove_error) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to remove temporary mount directory: " << remove_error.message() << std::endl;
+        }
+        remove_error.clear();
+        fs::remove_all(FlashConfig::EXTRACTED_IMAGE_DIRECTORY, remove_error);
+        if (remove_error) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to remove extracted image directory: " << remove_error.message() << std::endl;
+        }
         ::sync();
     }
 };

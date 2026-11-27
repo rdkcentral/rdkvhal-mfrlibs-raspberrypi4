@@ -22,38 +22,70 @@ and is installed to the configured binary directory.
 
 ## Invocation
 
-The entry point accepts either an OTA path directly or a directory and file
-name:
+The entry point accepts an OTA path directly, or a directory and file name
+with an optional notification interval:
 
 ```text
 FlashApp <absolute path to OTA file>
 FlashApp <directory path> <OTA file name>
+FlashApp <directory path> <OTA file name> <notification interval in seconds>
 ```
 
-Invalid argument counts print both usage forms and return status `1`. The
+Missing arguments print the usage forms and return status `1`. The
 application installs handlers for `SIGINT`, `SIGTERM`, and `SIGHUP`, creates a
 `NativeFlashProcessor` for the supplied path, and returns `0` when
 `flash()` returns `mfrERR_NONE` or `1` otherwise. A handled signal exits with
-that signal number. FlashApp logs each upgrade status callback, with periodic
-updates every `STATUS_NOTIFY_INTERVAL_SECONDS` (2 seconds).
+that signal number. FlashApp logs each upgrade status callback using its phase
+name and numeric value. The default notification interval is
+`STATUS_NOTIFY_INTERVAL_SECONDS` (2 seconds). The optional interval must be a
+non-negative integer; invalid or extra arguments are rejected.
 
 ## Status Reporting
 
-`flash()` takes a `mfrUpgradeStatusNotify_t` and returns `mfrError_t`,
-following the `mfrWriteImage()` contract from `mfrTypes.h`:
+`flash()` takes a `mfrUpgradeStatusNotify_t` and returns `mfrError_t`.
+The native flasher uses the HAL status types with richer phase notifications:
 
 - Errors found before flashing starts are returned without calling
   `notify.cb`: an active instance lock returns
   `mfrERR_OPERATION_NOT_SUPPORTED` and a missing image returns
   `mfrERR_IMAGE_FILE_OPEN_FAILED`.
-- After flashing starts, `notify.cb` receives `mfrUPGRADE_PROGRESS_STARTED`
-  with the current percentage every `notify.interval` seconds. An interval of
-  `0` disables the periodic updates.
+- With a positive interval, phase transitions are reported immediately:
+  `mfrUPGRADE_PROGRESS_NOT_STARTED`, `mfrUPGRADE_PROGRESS_STARTED`,
+  `mfrUPGRADE_PROGRESS_VERIFYING`, and `mfrUPGRADE_PROGRESS_FLASHING`.
+  Periodic callbacks repeat the current phase and percentage every
+  `notify.interval` seconds. Even short phases are reported.
+- An interval of `0` delivers only the final result, with no intermediate
+  phase or periodic callbacks.
 - Exactly one final callback is delivered: `mfrUPGRADE_PROGRESS_COMPLETED`
   with 100%, or `mfrUPGRADE_PROGRESS_ABORTED` with the error code and a short
   `error_string`.
 - `flash()` blocks until the update finishes. `notify.cbData` is not passed to
   the callback because the HAL callback signature has no data argument.
+
+`ABORTED` is an alternative to `COMPLETED`, not a normal success phase.
+`VERIFYING` covers extraction, the existing MBR checks, backup, and image
+mount preparation; it does not introduce signature or checksum verification.
+`FLASHING` starts before erasing the passive bank and continues through boot
+copying and the bank switch.
+
+Progress is measured within weighted stages, rather than advanced by a timer:
+
+| Work | Percentage range | Measurement |
+| --- | --- | --- |
+| Archive extraction | 0-30% | Compressed archive bytes consumed by libarchive |
+| Image validation | 30-35% | Completion of the existing MBR checks |
+| Boot backup | 35-40% | Bytes copied |
+| Loop and mount preparation | 40-45% | Preparation milestones |
+| Passive root filesystem copy | 45-80% | Bytes copied |
+| Boot partition copy | 80-90% | Bytes copied |
+| Boot command-line update | 90-99% | Successful bank-switch update |
+
+Copies update the byte count after each 64 KiB block, including within large
+files, and preserve file permissions. Percentages never decrease, and 100% is
+reserved for successful completion. Archive progress is approximate because
+libarchive buffers compressed input. Directory scanning, deletion, and disk
+synchronization can still hold a percentage steady; progress is not fabricated
+while those operations run.
 
 | Failure | Returned error |
 | --- | --- |
