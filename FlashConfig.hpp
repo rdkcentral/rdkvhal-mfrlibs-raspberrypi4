@@ -52,6 +52,7 @@ namespace FlashConfig {
     static constexpr size_t ARCHIVE_READ_BLOCK_SIZE = 10240;
     static constexpr int INVALID_FILE_DESCRIPTOR = -1;
     static constexpr int LOOP_DEVICE_STABILIZATION_DELAY_MS = 200;
+    static constexpr int STATUS_NOTIFY_INTERVAL_SECONDS = 2;
 
     // Direct Native Resource Throttling Parameters
     static constexpr int CPU_NICE_LOW_PRIORITY = 10;

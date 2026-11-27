@@ -29,10 +29,13 @@
 #include <filesystem>
 #include <memory>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/mount.h>
@@ -45,7 +48,92 @@
 #include <archive.h>
 #include <archive_entry.h>
 
+#include "mfrTypes.h"
+
 namespace fs = std::filesystem;
+
+/**
+ * @brief Reports mfrWriteImage() style upgrade status through mfrUpgradeStatusNotify_t.
+ * While running, notify.cb receives mfrUPGRADE_PROGRESS_STARTED every notify.interval seconds
+ * (no periodic callbacks when interval is 0). finish() always delivers exactly one final
+ * mfrUPGRADE_PROGRESS_COMPLETED or mfrUPGRADE_PROGRESS_ABORTED callback.
+ */
+class UpgradeStatusReporter {
+private:
+    const mfrUpgradeStatusNotify_t m_notify;
+    std::mutex m_mutex;
+    std::condition_variable m_stop_condition;
+    std::thread m_periodic_thread;
+    bool m_stop_requested = false;
+    bool m_is_finished = false;
+    int m_percentage = 0;
+
+    void deliver(mfrUpgradeProgress_t progress, mfrError_t error, const std::string& error_string, int percentage)
+    {
+        mfrUpgradeStatus_t status {};
+        status.progress = progress;
+        status.error = error;
+        status.percentage = percentage;
+        std::snprintf(status.error_string, sizeof(status.error_string), "%s", error_string.c_str());
+        m_notify.cb(&status);
+    }
+
+    void report_periodically()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        while (!m_stop_condition.wait_for(lock, std::chrono::seconds(m_notify.interval), [this] { return m_stop_requested; })) {
+            const int percentage = m_percentage;
+            lock.unlock();
+            deliver(mfrUPGRADE_PROGRESS_STARTED, mfrERR_NONE, "", percentage);
+            lock.lock();
+        }
+    }
+
+    void stop_periodic_reports()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_stop_requested = true;
+        }
+        m_stop_condition.notify_all();
+        if (m_periodic_thread.joinable()) {
+            m_periodic_thread.join();
+        }
+    }
+
+public:
+    explicit UpgradeStatusReporter(const mfrUpgradeStatusNotify_t& notify) : m_notify(notify)
+    {
+        if (m_notify.cb && m_notify.interval > 0) {
+            m_periodic_thread = std::thread(&UpgradeStatusReporter::report_periodically, this);
+        }
+    }
+
+    ~UpgradeStatusReporter() { stop_periodic_reports(); }
+
+    UpgradeStatusReporter(const UpgradeStatusReporter&) = delete;
+    UpgradeStatusReporter& operator=(const UpgradeStatusReporter&) = delete;
+
+    void set_percentage(int percentage)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_percentage = percentage;
+    }
+
+    void finish(mfrError_t error, const std::string& error_string)
+    {
+        stop_periodic_reports();
+        if (m_is_finished || !m_notify.cb) {
+            return;
+        }
+        m_is_finished = true;
+        if (error == mfrERR_NONE) {
+            deliver(mfrUPGRADE_PROGRESS_COMPLETED, mfrERR_NONE, "", 100);
+        } else {
+            deliver(mfrUPGRADE_PROGRESS_ABORTED, error, error_string, m_percentage);
+        }
+    }
+};
 
 class NativeFlashProcessor {
 private:
@@ -332,6 +420,197 @@ private:
         }
     }
 
+    /**
+     * @brief Replace the contents of the boot directory with the provided source directory.
+     * @param source_directory The directory whose contents will be copied into the boot directory.
+     */
+    void replace_boot_contents(const fs::path& source_directory)
+    {
+        for (auto& directory_entry : fs::directory_iterator(FlashConfig::BOOT_DIRECTORY)) {
+            fs::remove_all(directory_entry.path());
+        }
+        copy_tree(source_directory, FlashConfig::BOOT_DIRECTORY);
+        ::sync();
+    }
+
+    /**
+     * @brief Restore the boot directory from the backup taken before flashing.
+     * @return true if the backup was restored, false otherwise.
+     */
+    bool restore_boot_backup()
+    {
+        try {
+            replace_boot_contents(FlashConfig::BOOT_BACKUP_DIRECTORY);
+            std::cout << FlashConfig::LOG_TAG << "Restored " << FlashConfig::BOOT_DIRECTORY << " from backup." << std::endl;
+            return true;
+        } catch (const std::exception& exception) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to restore " << FlashConfig::BOOT_DIRECTORY
+                      << " from backup; manual recovery required: " << exception.what() << std::endl;
+            return false;
+        }
+    }
+
+    /**
+     * @brief Point the boot command line at the newly flashed root filesystem device.
+     * @param active_rootfs_device The currently running root filesystem device.
+     * @param passive_rootfs_device The newly flashed root filesystem device.
+     * @return true if the boot command line refers to the passive device, false otherwise.
+     */
+    bool update_boot_command_line(const std::string& active_rootfs_device, const std::string& passive_rootfs_device)
+    {
+        std::ifstream command_line_input(FlashConfig::BOOT_COMMAND_LINE_PATH);
+        if (!command_line_input) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to read boot command line: " << FlashConfig::BOOT_COMMAND_LINE_PATH << std::endl;
+            return false;
+        }
+        std::string command_line_contents((std::istreambuf_iterator<char>(command_line_input)),
+                                          std::istreambuf_iterator<char>());
+        command_line_input.close();
+
+        size_t replacement_count = 0;
+        for (size_t device_position = command_line_contents.find(active_rootfs_device);
+             device_position != std::string::npos;
+             device_position = command_line_contents.find(active_rootfs_device, device_position + passive_rootfs_device.length())) {
+            command_line_contents.replace(device_position, active_rootfs_device.length(), passive_rootfs_device);
+            ++replacement_count;
+        }
+        if (replacement_count == 0) {
+            if (command_line_contents.find(passive_rootfs_device) != std::string::npos) {
+                std::cout << FlashConfig::LOG_TAG << "Boot command line already uses " << passive_rootfs_device << "." << std::endl;
+                return true;
+            }
+            std::cerr << FlashConfig::LOG_TAG << "Boot command line references neither " << active_rootfs_device
+                      << " nor " << passive_rootfs_device << "." << std::endl;
+            return false;
+        }
+
+        std::ofstream command_line_output(FlashConfig::BOOT_COMMAND_LINE_PATH, std::ios::trunc);
+        command_line_output << command_line_contents;
+        command_line_output.close();
+        if (!command_line_output) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to write boot command line: " << FlashConfig::BOOT_COMMAND_LINE_PATH << std::endl;
+            return false;
+        }
+        ::sync();
+        std::cout << FlashConfig::LOG_TAG << "Boot command line updated to use " << passive_rootfs_device << "." << std::endl;
+        return true;
+    }
+
+    /**
+     * @brief Run the flashing steps after the instance lock and image existence checks.
+     * @param status_reporter Receives the progress percentage of each completed step.
+     * @param failure_reason Set to a short description when a step fails.
+     * @return mfrERR_NONE on success, otherwise the error describing the failed step.
+     */
+    mfrError_t perform_flash(UpgradeStatusReporter& status_reporter, std::string& failure_reason)
+    {
+        const auto fail = [&failure_reason](mfrError_t error, const char* reason) {
+            failure_reason = reason;
+            return error;
+        };
+
+        // Apply CPU, IO, and core affinity constraints natively before doing heavy lifting
+        apply_reduced_priority();
+
+        if (is_gzip_archive(m_image_path)) {
+            std::cout << FlashConfig::LOG_TAG << "Image file is a GZIP archive. Unpacking..." << std::endl;
+            fs::create_directories(FlashConfig::EXTRACTED_IMAGE_DIRECTORY);
+            if (!unpack_archive(m_image_path, FlashConfig::EXTRACTED_IMAGE_DIRECTORY)) {
+                std::cerr << FlashConfig::LOG_TAG << "Failed to unpack GZIP archive: " << m_image_path << std::endl;
+                return fail(mfrERR_SRC_FILE_ERROR, "Archive unpack failed");
+            }
+            status_reporter.set_percentage(30);
+            std::string extracted_disk_image_path;
+            for (auto& directory_entry : fs::directory_iterator(FlashConfig::EXTRACTED_IMAGE_DIRECTORY)) {
+                if (directory_entry.is_regular_file() && has_mbr_signature(directory_entry.path().string())) {
+                    extracted_disk_image_path = directory_entry.path().string();
+                    break;
+                }
+            }
+            if (extracted_disk_image_path.empty()) {
+                std::cerr << FlashConfig::LOG_TAG << "No valid disk image with MBR signature found in unpacked archive." << std::endl;
+                return fail(mfrERR_BAD_IMAGE_HEADER, "No MBR disk image in archive");
+            }
+            fs::remove(m_image_path);
+            m_image_path = extracted_disk_image_path;
+        } else if (!has_mbr_signature(m_image_path)) {
+            return fail(mfrERR_BAD_IMAGE_HEADER, "Image has no MBR signature");
+        }
+        status_reporter.set_percentage(35);
+
+        fs::create_directories(FlashConfig::BOOT_MOUNT_DIRECTORY);
+        fs::create_directories(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY);
+        fs::create_directories(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
+        fs::remove_all(FlashConfig::BOOT_BACKUP_DIRECTORY);
+        fs::create_directories(FlashConfig::BOOT_BACKUP_DIRECTORY);
+        copy_tree(FlashConfig::BOOT_DIRECTORY, FlashConfig::BOOT_BACKUP_DIRECTORY);
+        if (!setup_loop_device(m_image_path)) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to set up loop device for image: " << m_image_path << std::endl;
+            return fail(mfrERR_SRC_FILE_ERROR, "Loop device setup failed");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(FlashConfig::LOOP_DEVICE_STABILIZATION_DELAY_MS));
+        status_reporter.set_percentage(40);
+
+        m_is_critical_update_phase.store(true, std::memory_order_release);
+
+        std::string image_rootfs_partition = m_loop_device_path + "p2";
+        if (::mount(image_rootfs_partition.c_str(),
+                    FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY,
+                    FlashConfig::EXT4_FILESYSTEM_TYPE, MS_RDONLY, nullptr) != 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to mount image root filesystem partition: " << image_rootfs_partition
+                      << ": " << std::strerror(errno) << std::endl;
+            return fail(mfrERR_BAD_IMAGE_HEADER, "Image rootfs mount failed");
+        }
+        std::string passive_rootfs_device = get_passive_rootfs_device();
+        std::cout << FlashConfig::LOG_TAG << "Passive root filesystem determined: " << passive_rootfs_device << std::endl;
+        if (::mount(passive_rootfs_device.c_str(),
+                    FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY,
+                    FlashConfig::EXT4_FILESYSTEM_TYPE, 0, nullptr) != 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to mount passive root filesystem device: " << passive_rootfs_device
+                      << ": " << std::strerror(errno) << std::endl;
+            return fail(mfrERR_WRITE_FLASH_FAILED, "Passive rootfs mount failed");
+        }
+        status_reporter.set_percentage(45);
+        for (auto& directory_entry : fs::directory_iterator(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY)) {
+            fs::remove_all(directory_entry.path());
+        }
+        copy_tree(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY, FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
+        ::sync();
+        ::umount(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
+        ::umount(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY);
+        std::cout << FlashConfig::LOG_TAG << "Root filesystem copied to " << passive_rootfs_device << "." << std::endl;
+        status_reporter.set_percentage(80);
+
+        // Like FlashApp.sh, only switch banks when both the boot and root filesystem updates succeed.
+        std::string image_boot_partition = m_loop_device_path + "p1";
+        if (::mount(image_boot_partition.c_str(),
+                    FlashConfig::BOOT_MOUNT_DIRECTORY,
+                    FlashConfig::VFAT_FILESYSTEM_TYPE, MS_RDONLY, nullptr) != 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to mount image boot partition: " << image_boot_partition
+                      << ": " << std::strerror(errno) << std::endl;
+            return fail(mfrERR_BAD_IMAGE_HEADER, "Image boot mount failed");
+        }
+        try {
+            replace_boot_contents(FlashConfig::BOOT_MOUNT_DIRECTORY);
+        } catch (const std::exception& exception) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to update " << FlashConfig::BOOT_DIRECTORY << ": " << exception.what() << std::endl;
+            ::umount(FlashConfig::BOOT_MOUNT_DIRECTORY);
+            restore_boot_backup();
+            return fail(mfrERR_WRITE_FLASH_FAILED, "Boot partition update failed");
+        }
+        ::umount(FlashConfig::BOOT_MOUNT_DIRECTORY);
+        std::cout << FlashConfig::LOG_TAG << "Boot partition contents updated." << std::endl;
+        status_reporter.set_percentage(90);
+
+        std::string active_rootfs_device = (passive_rootfs_device == FlashConfig::ROOTFS_BANK_A_DEVICE)
+            ? FlashConfig::ROOTFS_BANK_B_DEVICE : FlashConfig::ROOTFS_BANK_A_DEVICE;
+        if (!update_boot_command_line(active_rootfs_device, passive_rootfs_device)) {
+            restore_boot_backup();
+            return fail(mfrERR_UPDATE_BOOT_PARAMS_FAILED, "Boot cmdline update failed");
+        }
+        return mfrERR_NONE;
+    }
+
 public:
     explicit NativeFlashProcessor(const std::string& image_path) : m_image_path(image_path) {}
     ~NativeFlashProcessor() { cleanup(); }
@@ -357,119 +636,52 @@ public:
      * @brief Perform the flashing process.
      * This function handles the entire flashing process, including unpacking the image if it's a GZIP archive,
      * setting up loop devices, mounting partitions, copying files, and updating the boot command line.
-     * @return true if the flashing process was successful, false otherwise.
+     * Follows the mfrWriteImage() contract: errors detected before flashing starts are returned without
+     * invoking notify.cb; once started, notify.cb receives periodic mfrUPGRADE_PROGRESS_STARTED updates
+     * (every notify.interval seconds, if non-zero) and one final mfrUPGRADE_PROGRESS_COMPLETED or
+     * mfrUPGRADE_PROGRESS_ABORTED status. The call blocks until flashing finishes.
+     * @param notify The upgrade status callback configuration.
+     * @return mfrERR_NONE if the flashing process was successful, otherwise the mfrError_t describing the failure.
      */
-    bool flash()
+    mfrError_t flash(const mfrUpgradeStatusNotify_t& notify)
     {
         if (!lock_instance()) {
-            return false;
+            return mfrERR_OPERATION_NOT_SUPPORTED;
         }
 
-        if (!fs::exists(m_image_path)) {
+        std::error_code exists_error;
+        if (!fs::exists(m_image_path, exists_error)) {
             std::cerr << FlashConfig::LOG_TAG << "Image file does not exist: " << m_image_path << std::endl;
-            return false;
+            return mfrERR_IMAGE_FILE_OPEN_FAILED;
         }
 
-        // Apply CPU, IO, and core affinity constraints natively before doing heavy lifting
-        apply_reduced_priority();
-
-        if (is_gzip_archive(m_image_path)) {
-            std::cout << FlashConfig::LOG_TAG << "Image file is a GZIP archive. Unpacking..." << std::endl;
-            fs::create_directories(FlashConfig::EXTRACTED_IMAGE_DIRECTORY);
-            if (!unpack_archive(m_image_path, FlashConfig::EXTRACTED_IMAGE_DIRECTORY)) {
-                std::cerr << FlashConfig::LOG_TAG << "Failed to unpack GZIP archive: " << m_image_path << std::endl;
-                return false;
-            }
-            std::string extracted_disk_image_path;
-            for (auto& directory_entry : fs::directory_iterator(FlashConfig::EXTRACTED_IMAGE_DIRECTORY)) {
-                if (directory_entry.is_regular_file() && has_mbr_signature(directory_entry.path().string())) {
-                    extracted_disk_image_path = directory_entry.path().string();
-                    break;
-                }
-            }
-            if (extracted_disk_image_path.empty()) {
-                std::cerr << FlashConfig::LOG_TAG << "No valid disk image with MBR signature found in unpacked archive." << std::endl;
-                return false;
-            }
-            fs::remove(m_image_path);
-            m_image_path = extracted_disk_image_path;
+        UpgradeStatusReporter status_reporter(notify);
+        std::string failure_reason;
+        mfrError_t flash_result = mfrERR_NONE;
+        try {
+            flash_result = perform_flash(status_reporter, failure_reason);
+        } catch (const std::exception& exception) {
+            std::cerr << FlashConfig::LOG_TAG << "Flashing failed with exception: " << exception.what() << std::endl;
+            failure_reason = "Flash I/O error";
+            flash_result = mfrERR_WRITE_FLASH_FAILED;
         }
-
-        fs::create_directories(FlashConfig::BOOT_MOUNT_DIRECTORY);
-        fs::create_directories(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY);
-        fs::create_directories(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
-        fs::create_directories(FlashConfig::BOOT_BACKUP_DIRECTORY);
-        fs::remove_all(FlashConfig::BOOT_BACKUP_DIRECTORY);
-        copy_tree(FlashConfig::BOOT_DIRECTORY, FlashConfig::BOOT_BACKUP_DIRECTORY);
-        if (!setup_loop_device(m_image_path)) {
-            std::cerr << FlashConfig::LOG_TAG << "Failed to set up loop device for image: " << m_image_path << std::endl;
-            cleanup();
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(FlashConfig::LOOP_DEVICE_STABILIZATION_DELAY_MS));
-
-        m_is_critical_update_phase.store(true, std::memory_order_release);
-
-        std::string image_rootfs_partition = m_loop_device_path + "p2";
-        if (::mount(image_rootfs_partition.c_str(),
-                    FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY,
-                    FlashConfig::EXT4_FILESYSTEM_TYPE, MS_RDONLY, nullptr) != 0) {
-            m_is_critical_update_phase.store(false, std::memory_order_release);
-            std::cerr << FlashConfig::LOG_TAG << "Failed to mount image root filesystem partition: " << image_rootfs_partition << std::endl;
-            cleanup();
-            return false;
-        }
-        std::string passive_rootfs_device = get_passive_rootfs_device();
-        std::cout << FlashConfig::LOG_TAG << "Passive root filesystem determined: " << passive_rootfs_device << std::endl;
-        if (::mount(passive_rootfs_device.c_str(),
-                    FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY,
-                    FlashConfig::EXT4_FILESYSTEM_TYPE, 0, nullptr) != 0) {
-            ::umount(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY);
-            m_is_critical_update_phase.store(false, std::memory_order_release);
-            std::cerr << FlashConfig::LOG_TAG << "Failed to mount passive root filesystem device: " << passive_rootfs_device << std::endl;
-            return false;
-        }
-        for (auto& directory_entry : fs::directory_iterator(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY)) {
-            fs::remove_all(directory_entry.path());
-        }
-        copy_tree(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY, FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
-        ::umount(FlashConfig::TARGET_ROOT_FILESYSTEM_MOUNT_DIRECTORY);
-        ::umount(FlashConfig::ROOT_FILESYSTEM_MOUNT_DIRECTORY);
-
-        std::string image_boot_partition = m_loop_device_path + "p1";
-        if (::mount(image_boot_partition.c_str(),
-                    FlashConfig::BOOT_MOUNT_DIRECTORY,
-                    FlashConfig::VFAT_FILESYSTEM_TYPE, MS_RDONLY, nullptr) == 0) {
-            for (auto& directory_entry : fs::directory_iterator(FlashConfig::BOOT_DIRECTORY)) {
-                fs::remove_all(directory_entry.path());
-            }
-            copy_tree(FlashConfig::BOOT_MOUNT_DIRECTORY, FlashConfig::BOOT_DIRECTORY);
-            ::umount(FlashConfig::BOOT_MOUNT_DIRECTORY);
-        }
-        std::string active_rootfs_device = (passive_rootfs_device == FlashConfig::ROOTFS_BANK_A_DEVICE)
-            ? FlashConfig::ROOTFS_BANK_B_DEVICE : FlashConfig::ROOTFS_BANK_A_DEVICE;
-        std::ifstream command_line_input(FlashConfig::BOOT_COMMAND_LINE_PATH);
-        if (command_line_input) {
-            std::string command_line_contents((std::istreambuf_iterator<char>(command_line_input)),
-                                              std::istreambuf_iterator<char>());
-            command_line_input.close();
-            size_t active_device_position = command_line_contents.find(active_rootfs_device);
-            if (active_device_position != std::string::npos) {
-                command_line_contents.replace(active_device_position, active_rootfs_device.length(), passive_rootfs_device);
-                std::ofstream command_line_output(FlashConfig::BOOT_COMMAND_LINE_PATH, std::ios::trunc);
-                command_line_output << command_line_contents;
-            }
-        }
-
         m_is_critical_update_phase.store(false, std::memory_order_release);
+
+        if (flash_result == mfrERR_NONE) {
+            std::cout << FlashConfig::LOG_TAG << "Flashing process completed successfully." << std::endl;
+        } else {
+            std::cerr << FlashConfig::LOG_TAG << "Flashing process failed: " << failure_reason
+                      << " (error " << flash_result << ")." << std::endl;
+            cleanup();
+        }
+        status_reporter.finish(flash_result, failure_reason);
 
         if (m_has_deferred_signal.load(std::memory_order_acquire)) {
             std::cout << FlashConfig::LOG_TAG << "Processing deferred signal (" << m_deferred_signal_number.load() << ")." << std::endl;
             cleanup();
             std::exit(m_deferred_signal_number.load());
         }
-        std::cout << FlashConfig::LOG_TAG << "Flashing process completed successfully." << std::endl;
-        return true;
+        return flash_result;
     }
 
     /**

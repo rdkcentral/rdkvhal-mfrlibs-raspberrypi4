@@ -25,6 +25,8 @@
 #include <csignal>
 #include <memory>
 
+#include "mfrTypes.h"
+
 std::unique_ptr<NativeFlashProcessor> flash_processor = nullptr;
 
 /**
@@ -49,27 +51,52 @@ void signal_handler(int signal_number)
 int main(int argument_count, char* argument_values[])
 {
 #if defined(GIT_SHA)
-    std::cout << "[FLASHER] Version: " << GIT_SHA << std::endl;
+    std::cout << FlashConfig::LOG_TAG << "Version: " << GIT_SHA << std::endl;
 #endif
     std::string ota_image_path;
 
-    if (argument_count == 3) {
+    if (argument_count >= 3) {
         ota_image_path = (fs::path(argument_values[1]) / argument_values[2]).string();
     } else if (argument_count == 2) {
         ota_image_path = argument_values[1];
     } else {
-        std::cerr << "Usage Method 1: " << argument_values[0] << " <directory path> <ota file name>\n"
-                  << "Usage Method 2: " << argument_values[0] << " <absolute path to ota file>" << std::endl;
+        std::cerr << "Usage Method 1: " << argument_values[0] << " <directory path> <ota file name> <notification interval in sec>\n"
+                  << "Usage Method 2: " << argument_values[0] << " <directory path> <ota file name>\n"
+                  << "Usage Method 3: " << argument_values[0] << " <absolute path to ota file>" << std::endl;
         return 1;
     }
+
+    int notify_interval_seconds = FlashConfig::STATUS_NOTIFY_INTERVAL_SECONDS;
+    if (argument_count == 4) {
+        try {
+            notify_interval_seconds = std::stoi(argument_values[3]);
+            if (notify_interval_seconds < 0) {
+                notify_interval_seconds = FlashConfig::STATUS_NOTIFY_INTERVAL_SECONDS;
+            }
+        } catch (const std::exception& exception) {
+            notify_interval_seconds = FlashConfig::STATUS_NOTIFY_INTERVAL_SECONDS;
+        }
+    }
+
+    std::cout << FlashConfig::LOG_TAG << "Flashing image: " << ota_image_path
+              << " with status notification interval: " << notify_interval_seconds << " seconds." << std::endl;
 
     std::signal(SIGINT,  signal_handler);
     std::signal(SIGTERM, signal_handler);
     std::signal(SIGHUP,  signal_handler);
 
+    mfrUpgradeStatusNotify_t notify {};
+    notify.cbData = nullptr;
+    notify.cb = [](mfrUpgradeStatus_t *status) {
+        if (status) {
+            std::cout << FlashConfig::LOG_TAG << "Upgrade status: progress " << status->progress
+                      << ", error " << status->error
+                      << ", error string '" << status->error_string << "'"
+                      << ", percentage " << status->percentage << "%" << std::endl;
+        }
+    };
+    notify.interval = notify_interval_seconds;
+
     flash_processor = std::make_unique<NativeFlashProcessor>(ota_image_path);
-    if (flash_processor->flash()) {
-        return 0;
-    }
-    return 1;
+    return (flash_processor->flash(notify) == mfrERR_NONE) ? 0 : 1;
 }

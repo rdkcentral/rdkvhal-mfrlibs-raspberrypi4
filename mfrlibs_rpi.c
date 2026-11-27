@@ -40,6 +40,10 @@
 #include <mfr_wifi_types.h>
 #include <mfr_wifi_api.h>
 
+#ifdef USE_NATIVE_FLASHER
+#include "FlashProcessor.hpp"
+#endif
+
 #define MAX_BUF_LEN 255
 #define MAC_ADDRESS_SIZE 32
 #define LOG_CONFIG_FILE "/etc/debug.ini"
@@ -1581,7 +1585,17 @@ mfrError_t mfrWriteImage(const char *name,  const char *path, mfrImageType_t typ
         mfrlib_log("mfrWriteImage invalid input\n");
         return mfrERR_INVALID_PARAM;
     }
-    // TODO: change FlashApp.sh logic to use mfrWriteImage
+
+#ifdef USE_NATIVE_FLASHER
+    mfrlib_log("mfrWriteImage using native Flasher implementation.\n");
+    char ota_image_path[MAX_BUF_LEN];
+    if (snprintf(ota_image_path, sizeof(ota_image_path), "%s/%s", path, name) >= (int)sizeof(ota_image_path)) {
+        mfrlib_log("mfrWriteImage path too long\n");
+        return mfrERR_INVALID_PARAM;
+    }
+    std::unique_ptr<NativeFlashProcessor> flash_processor = std::make_unique<NativeFlashProcessor>(ota_image_path);
+    return flash_processor->flash(notify);
+#endif
     return mfrERR_OPERATION_NOT_SUPPORTED;
 }
 

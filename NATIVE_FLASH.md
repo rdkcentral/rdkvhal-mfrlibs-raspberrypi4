@@ -33,8 +33,34 @@ FlashApp <directory path> <OTA file name>
 Invalid argument counts print both usage forms and return status `1`. The
 application installs handlers for `SIGINT`, `SIGTERM`, and `SIGHUP`, creates a
 `NativeFlashProcessor` for the supplied path, and returns `0` when
-`flash()` succeeds or `1` when it fails. A handled signal exits with that
-signal number.
+`flash()` returns `mfrERR_NONE` or `1` otherwise. A handled signal exits with
+that signal number. FlashApp logs each upgrade status callback, with periodic
+updates every `STATUS_NOTIFY_INTERVAL_SECONDS` (2 seconds).
+
+## Status Reporting
+
+`flash()` takes a `mfrUpgradeStatusNotify_t` and returns `mfrError_t`,
+following the `mfrWriteImage()` contract from `mfrTypes.h`:
+
+- Errors found before flashing starts are returned without calling
+  `notify.cb`: an active instance lock returns
+  `mfrERR_OPERATION_NOT_SUPPORTED` and a missing image returns
+  `mfrERR_IMAGE_FILE_OPEN_FAILED`.
+- After flashing starts, `notify.cb` receives `mfrUPGRADE_PROGRESS_STARTED`
+  with the current percentage every `notify.interval` seconds. An interval of
+  `0` disables the periodic updates.
+- Exactly one final callback is delivered: `mfrUPGRADE_PROGRESS_COMPLETED`
+  with 100%, or `mfrUPGRADE_PROGRESS_ABORTED` with the error code and a short
+  `error_string`.
+- `flash()` blocks until the update finishes. `notify.cbData` is not passed to
+  the callback because the HAL callback signature has no data argument.
+
+| Failure | Returned error |
+| --- | --- |
+| Archive extraction or loop-device setup | `mfrERR_SRC_FILE_ERROR` |
+| No MBR image, or image partition mount failure | `mfrERR_BAD_IMAGE_HEADER` |
+| Passive bank mount, boot copy, or filesystem exception | `mfrERR_WRITE_FLASH_FAILED` |
+| `/boot/cmdline.txt` update | `mfrERR_UPDATE_BOOT_PARAMS_FAILED` |
 
 ## Update Workflow
 
@@ -47,7 +73,8 @@ signal number.
 3. If the file has a gzip signature, creates `/opt/ota/wicimage`, extracts the
    gzip-compressed tar archive there using libarchive, and searches the
    extracted top-level files for one with an MBR signature. The compressed
-   input is removed after a matching image is found.
+   input is removed after a matching image is found. An uncompressed input
+   must itself have an MBR signature.
 4. Creates mount and backup directories under `/opt/ota/extblock`, removes the
    previous boot backup, and copies `/boot` to
    `/opt/ota/extblock/old_boot_bkup`.
@@ -60,9 +87,13 @@ signal number.
    bank based on `/proc/cmdline`, mounts that bank, clears its existing
    contents, and copies the image root filesystem to it.
 7. Mounts image partition 1 read-only as VFAT, clears `/boot`, and copies the
-   image boot contents there. It then replaces the active bank path in
-   `/boot/cmdline.txt` with the passive bank path.
-8. Leaves the critical phase and processes any deferred termination signal.
+   image boot contents there. It then replaces every occurrence of the active
+   bank path in `/boot/cmdline.txt` with the passive bank path. A command line
+   that already names only the passive bank is accepted. As in `FlashApp.sh`,
+   a boot mount failure aborts before the bank switch, and a boot copy or
+   command-line update failure restores `/boot` from the backup.
+8. Leaves the critical phase, reports the final status, and processes any
+   deferred termination signal.
 
 Archive extraction must reach normal EOF and successfully write and finalize
 every entry. Reader/writer initialization, header, data, finalization, or close
@@ -121,13 +152,12 @@ directories, and call `sync()`.
 
 ## Implementation Notes
 
-- The root filesystem copy result is not used to stop the later boot-copy and
-  command-line update sequence. The boot partition mount failure also does not
-  immediately return from `flash()`.
-- Failures during the update can leave partially written target partitions;
-  cleanup releases resources but does not restore the passive root filesystem.
-  The saved boot backup is created before the update, but automatic restoration
-  is not performed by the cleanup routine.
+- Filesystem errors during copying are caught and reported as
+  `mfrERR_WRITE_FLASH_FAILED`; the bank switch only happens after both the
+  root filesystem and boot updates succeed.
+- Failures during the update can leave a partially written passive root
+  filesystem; cleanup releases resources but does not restore it. The active
+  bank stays selected in that case.
 - The code uses C++17 filesystem operations, Linux loop-device, mount,
   scheduling, and I/O-priority interfaces, and libarchive for gzip/tar
   extraction. Availability of BusyBox utilities alone is not sufficient for

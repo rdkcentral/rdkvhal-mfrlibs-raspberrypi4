@@ -77,6 +77,7 @@ add_executable(mfrHalUtility mfrlib_utility.c)
 target_link_libraries(mfrHalUtility PRIVATE RDKMfrLib)
 
 add_executable(FlashApp FlashApp.cpp FlashProcessor.hpp FlashConfig.hpp)
+target_include_directories(FlashApp PRIVATE ${RDKMFRLIBS_INCLUDE_DIRS})
 target_link_libraries(FlashApp PRIVATE PkgConfig::LIBARCHIVE Threads::Threads)
 
 function(check_flashapp_filesystem)
