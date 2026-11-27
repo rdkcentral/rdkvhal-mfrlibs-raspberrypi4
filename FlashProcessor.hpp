@@ -28,6 +28,8 @@
 #include <string>
 #include <filesystem>
 #include <memory>
+#include <cerrno>
+#include <cstring>
 #include <chrono>
 #include <thread>
 #include <atomic>
@@ -285,7 +287,15 @@ private:
             return false;
         }
         ::close(image_file_descriptor);
-        return (::ioctl(m_loop_device_file_descriptor, LOOP_SET_STATUS64, nullptr) >= 0);
+        struct loop_info64 loop_info {};
+        loop_info.lo_flags = LO_FLAGS_PARTSCAN;
+        if (::ioctl(m_loop_device_file_descriptor, LOOP_SET_STATUS64, &loop_info) < 0) {
+            const int error_number = errno;
+            std::cerr << FlashConfig::LOG_TAG << "Failed to enable loop device partition scanning: "
+                      << m_loop_device_path << ": " << std::strerror(error_number) << std::endl;
+            return false;
+        }
+        return true;
     }
 
     /**

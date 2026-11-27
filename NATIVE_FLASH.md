@@ -51,8 +51,10 @@ signal number.
 4. Creates mount and backup directories under `/opt/ota/extblock`, removes the
    previous boot backup, and copies `/boot` to
    `/opt/ota/extblock/old_boot_bkup`.
-5. Obtains a loop device for the image and waits for the configured 200 ms
-   stabilization period.
+5. Obtains a loop device for the image, enables partition scanning using
+   `LOOP_SET_STATUS64` with a populated `loop_info64` structure and
+   `LO_FLAGS_PARTSCAN`, and waits for the configured 200 ms stabilization
+   period. Configuration failures report the underlying system error.
 6. Marks the update as being in its critical phase. It mounts image partition
    2 read-only as the new root filesystem, chooses the passive root filesystem
    bank based on `/proc/cmdline`, mounts that bank, clears its existing
