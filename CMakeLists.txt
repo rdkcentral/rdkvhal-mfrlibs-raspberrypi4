@@ -45,6 +45,21 @@ pkg_check_modules(LIBARCHIVE REQUIRED IMPORTED_TARGET libarchive)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
 find_package(Threads REQUIRED)
 
+# Add GIT version to the compile flags
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+if (NOT GIT_SHA STREQUAL "")
+    message(STATUS "GIT_SHA is set to ${GIT_SHA}")
+    add_definitions(-DGIT_SHA=\"${GIT_SHA}\")
+else()
+    message(STATUS "GIT_SHA is not set")
+endif()
+
 add_library(RDKMfrLib SHARED mfrlibs_rpi.c)
 # Preserve the previous Libtool default SONAME and library version.
 set_target_properties(RDKMfrLib PROPERTIES VERSION 0.0.0 SOVERSION 0)

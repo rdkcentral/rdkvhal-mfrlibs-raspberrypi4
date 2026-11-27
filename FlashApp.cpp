@@ -48,6 +48,9 @@ void signal_handler(int signal_number)
  */
 int main(int argument_count, char* argument_values[])
 {
+#if defined(GIT_SHA)
+    std::cout << "FlashApp Version: " << GIT_SHA << std::endl;
+#endif
     std::string ota_image_path;
 
     if (argument_count == 3) {

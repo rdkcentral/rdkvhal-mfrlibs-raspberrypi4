@@ -39,7 +39,7 @@ namespace FlashConfig {
     static constexpr const char* INSTANCE_LOCK_FILE = "/var/run/flash_app.lock";
     static constexpr const char* EXT4_FILESYSTEM_TYPE = "ext4";
     static constexpr const char* VFAT_FILESYSTEM_TYPE = "vfat";
-    static constexpr const char* LOG_TAG = "[NATIVE_FLASH] ";
+    static constexpr const char* LOG_TAG = "[FLASHER] ";
     static constexpr const char* ROOTFS_BANK_A_DEVICE = "/dev/mmcblk0p2";
     static constexpr const char* ROOTFS_BANK_B_DEVICE = "/dev/mmcblk0p3";
     static constexpr size_t GZIP_HEADER_SIZE = 2;
