@@ -24,10 +24,8 @@
 #include "FlashProcessor.hpp"
 #include <csignal>
 #include <charconv>
-#include <cstdlib>
 #include <iomanip>
 #include <iostream>
-#include <memory>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -35,7 +33,7 @@
 
 #include "mfrTypes.h"
 
-std::unique_ptr<NativeFlashProcessor> flash_processor;
+volatile std::sig_atomic_t termination_signal = 0;
 
 constexpr std::string_view upgrade_progress_name(mfrUpgradeProgress_t progress) noexcept
 {
@@ -68,13 +66,12 @@ bool parse_notification_interval(std::string_view value, int& interval) noexcept
 /**
  * @brief Signal handler for the flashing process.
  * This function is invoked when the process receives a signal (e.g., SIGINT, SIGTERM, SIGHUP).
- * It delegates the signal handling to the NativeFlashProcessor instance if it exists.
+ * Only records the signal; normal execution handles reporting and cleanup.
  * @param signal_number The signal number received by the process.
  */
 void signal_handler(int signal_number)
 {
-    if (flash_processor) flash_processor->handle_signal(signal_number);
-    else std::exit(signal_number);
+    termination_signal = signal_number;
 }
 
 /**
@@ -124,7 +121,7 @@ int main(int argument_count, char* argument_values[])
     notify.cb = [](mfrUpgradeStatus_t *status) {
         if (status) {
             std::cout << FlashConfig::LOG_TAG
-                      << "Upgrade status: " << std::left << std::setw(16) << upgrade_progress_name(status->progress)
+                      << "Upgrade status: " << std::left << std::setw(12) << upgrade_progress_name(status->progress)
                       << " (" << status->progress << ")"
                       << ", percentage:" << std::right << std::setw(3) << status->percentage << "%"
                       << ", error:" << status->error
@@ -132,6 +129,12 @@ int main(int argument_count, char* argument_values[])
         }
     };
 
-    flash_processor = std::make_unique<NativeFlashProcessor>(ota_image_path);
-    return (flash_processor->flash(notify) == mfrERR_NONE) ? 0 : 1;
+    NativeFlashProcessor flash_processor(ota_image_path, &termination_signal);
+    const mfrError_t result = flash_processor.flash(notify);
+    if (termination_signal != 0) {
+        std::cout << FlashConfig::LOG_TAG << "Termination signal (" << termination_signal
+                  << ") received. Update stopped or finished safely; exiting." << std::endl;
+        return termination_signal;
+    }
+    return result == mfrERR_NONE ? 0 : 1;
 }

@@ -487,7 +487,7 @@ bool read_exact(const std::function<la_ssize_t(std::uint8_t*, std::size_t, std::
 bool read_and_discard(
     const std::function<la_ssize_t(std::uint8_t*, std::size_t, std::string&)>& reader,
     std::uint64_t byte_count,
-    std::vector<std::uint8_t>& scratch,
+    std::array<std::uint8_t, kChunkSize>& scratch,
     std::string& error)
 {
     while (byte_count > 0) {
@@ -730,6 +730,7 @@ bool consume_partition_data(
     TargetFile& boot_file,
     TargetFile& rootfs_file,
     const WicStreamProgress& progress,
+    const WicStreamWriteStart& on_write_start,
     StreamState& state,
     std::string& error,
     int& error_code)
@@ -790,6 +791,7 @@ bool consume_partition_data(
 
     std::array<std::uint8_t, kChunkSize> buffer {};
     std::uint64_t stream_offset = header.size();
+    bool writing_started = false;
     for (const PartitionRange& partition : targets) {
         const std::uint64_t partition_end = partition.start_byte + partition.byte_length;
         if (partition.start_byte < stream_offset || partition_end > image_size) {
@@ -812,6 +814,12 @@ bool consume_partition_data(
             if (!read_exact(reader, buffer.data(), chunk, error)) {
                 error_code = EIO;
                 return false;
+            }
+            if (!writing_started) {
+                if (on_write_start) {
+                    on_write_start();
+                }
+                writing_started = true;
             }
             if (!write_all_at(target.descriptor.get(), buffer.data(), chunk, partition_offset, error)) {
                 error_code = errno == 0 ? EIO : errno;
@@ -903,6 +911,7 @@ WicStreamResult stream_raw_image(int input_descriptor,
                                  TargetFile& boot_file,
                                  TargetFile& rootfs_file,
                                  const WicStreamProgress& progress,
+                                 const WicStreamWriteStart& on_write_start,
                                  StreamState& state)
 {
     std::string error;
@@ -920,7 +929,7 @@ WicStreamResult stream_raw_image(int input_descriptor,
         }
     };
     if (!consume_partition_data(reader, image_size, rootfs_device, boot_file, rootfs_file,
-                                progress, state, error, error_code)) {
+                                progress, on_write_start, state, error, error_code)) {
         return failure(error_code, std::move(error));
     }
     std::uint8_t extra_byte = 0;
@@ -947,6 +956,7 @@ WicStreamResult stream_tar_gz_image(int input_descriptor,
                                     TargetFile& boot_file,
                                     TargetFile& rootfs_file,
                                     const WicStreamProgress& progress,
+                                    const WicStreamWriteStart& on_write_start,
                                     StreamState& state)
 {
     std::unique_ptr<struct archive, decltype(&archive_read_free)> reader(archive_read_new(), archive_read_free);
@@ -1030,7 +1040,7 @@ WicStreamResult stream_tar_gz_image(int input_descriptor,
             };
             if (!consume_partition_data(archive_reader, static_cast<std::uint64_t>(signed_image_size),
                                         rootfs_device, boot_file, rootfs_file, progress,
-                                        state, error, error_code)) {
+                                        on_write_start, state, error, error_code)) {
                 break;
             }
             std::uint8_t extra_byte = 0;
@@ -1165,7 +1175,8 @@ bool unmount_rootfs_bank(const std::string& device_path, std::string& error, int
  */
 WicStreamResult stream_wic_image(const std::string& image_path,
                                  const std::string& rootfs_device,
-                                 const WicStreamProgress& progress)
+                                 const WicStreamProgress& progress,
+                                 const WicStreamWriteStart& on_write_start)
 {
     if (rootfs_device.empty()) {
         return failure(EINVAL, "Passive root filesystem device is not specified");
@@ -1211,10 +1222,10 @@ WicStreamResult stream_wic_image(const std::string& image_path,
     WicStreamResult result;
     if (signature == kGzipMagic) {
         result = stream_tar_gz_image(input.get(), rootfs_device, boot_file, rootfs_file,
-                                     progress, state);
+                                     progress, on_write_start, state);
     } else {
         result = stream_raw_image(input.get(), static_cast<std::uint64_t>(input_status.st_size),
-                                  rootfs_device, boot_file, rootfs_file, progress, state);
+                                  rootfs_device, boot_file, rootfs_file, progress, on_write_start, state);
     }
 
     std::string close_error;

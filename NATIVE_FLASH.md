@@ -63,11 +63,15 @@ The native flasher uses the HAL status types with richer phase notifications:
   the callback because the HAL callback signature has no data argument.
 
 `ABORTED` is an alternative to `COMPLETED`, not a normal success phase.
-`VERIFYING` covers validation of the input archive and partition table, active
-bank selection, and the `/boot` backup. The flasher validates gzip/tar
-integrity, MBR geometry, and GPT checksums when applicable; it does not verify
-a cryptographic image signature. `FLASHING` begins before writing the passive
-bank and continues through boot copying and the bank switch.
+`VERIFYING` covers initial input/archive checks, partition-table validation,
+active bank selection, passive-bank unmounting and capacity checks, and the
+`/boot` backup. `FLASHING` starts at 40%, immediately before the first partition
+write, only after those checks succeed. An oversized WIC rootfs therefore aborts
+from `VERIFYING` without a `FLASHING` notification. The flasher validates MBR
+geometry and GPT checksums when applicable; it does not verify a cryptographic
+image signature. Gzip/tar data and trailer integrity checks continue during
+streaming, so late corruption can still abort from `FLASHING`. That phase
+continues through boot copying and the bank switch.
 
 Progress is measured within weighted stages, rather than advanced by a timer:
 
@@ -108,8 +112,11 @@ decrease, and 100% is reserved for successful completion.
    `/proc/self/mountinfo`. The running root filesystem is never unmounted. If
    any mount point is busy, the update fails before anything is written. The
    passive bank is not remounted; it is mounted again at the next boot.
-5. Backs up `/boot` to `/opt/ota/extblock/old_boot_bkup` before writing either
-   partition.
+5. Verifies that `/boot` is a writable vfat mount of `/dev/mmcblk0p1`, then backs
+   it up to `/opt/ota/extblock/old_boot_bkup` before writing either partition.
+   Missing, wrong-device, or read-only mounts fail closed. The mount is checked
+   again before streaming, boot replacement, rollback, and the bank switch.
+   An existing backup is never overwritten: resolve it manually before retrying.
 6. Streams a raw `.wic` file or the single regular `.wic` member of a
    `.wic.tar.gz` archive. It does not extract the full disk image. The primary
    MBR or GPT partition table is bounds-checked; GPT header and entry-array
@@ -131,7 +138,10 @@ decrease, and 100% is reserved for successful completion.
 9. Mounts the staged boot image read-only through a loop device, updates `/boot`
    from it, then writes a temporary `cmdline.txt`, synchronizes it, and renames
    it over the original. A boot update or bank-switch failure attempts to
-   restore `/boot` from the backup.
+   restore `/boot` from the backup. Both replacement and rollback preserve
+   `/boot/first_use_date.txt` in place, including its FAT creation time; an image
+   or backup entry with that name is not copied over the device-specific marker.
+   A failed restoration retains the backup and reports its location for recovery.
 10. Leaves the critical phase, reports the final status, and processes any
    deferred termination signal.
 
@@ -179,12 +189,16 @@ does not read them from a runtime configuration file.
 
 ## Signals and Cleanup
 
-Outside the critical phase, a received signal invokes cleanup and exits. During
-the critical phase, the signal number is saved and termination is deferred
-until the phase ends; the saved signal is then processed after cleanup.
+The signal handler only assigns a `volatile sig_atomic_t` flag. Normal execution
+checks the flag during preparation and backup, reports an abort, and cleans up.
+During the critical phase, termination is deferred until the update or rollback
+finishes; logging, cleanup, and the signal-number exit status happen outside the
+handler.
 Cleanup unmounts the staged boot partition, detaches and closes the loop
 device, removes the staged boot image after detaching it, releases the instance
-lock, and removes the temporary mount and backup directories. The lock file
+lock, and removes the temporary mount directory. The boot backup is deleted
+only after a successful update or confirmed restoration; otherwise it and its
+parent directory are retained. The lock file
 itself remains in place so concurrent invocations always lock the same inode.
 
 ## Implementation Notes

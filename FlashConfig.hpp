@@ -29,6 +29,8 @@ namespace FlashConfig {
     static constexpr const char* BOOT_MOUNT_DIRECTORY = "/opt/ota/extblock/ota_boot";
     static constexpr const char* BOOT_BACKUP_DIRECTORY = "/opt/ota/extblock/old_boot_bkup";
     static constexpr const char* BOOT_DIRECTORY = "/boot";
+    static constexpr const char* BOOT_DEVICE = "/dev/mmcblk0p1";
+    static constexpr const char* FIRST_USE_DATE_FILENAME = "first_use_date.txt";
     static constexpr const char* BOOT_COMMAND_LINE_PATH = "/boot/cmdline.txt";
     static constexpr const char* PROC_COMMAND_LINE_PATH = "/proc/cmdline";
     static constexpr const char* LOOP_CONTROL_DEVICE = "/dev/loop-control";

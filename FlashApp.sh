@@ -35,8 +35,15 @@ logger() {
 if [ -f /usr/bin/FlashApp ]; then
     logger "Using the FlashApp binary for flashing."
     # Redirect the logs to logger.
-    /usr/bin/FlashApp "$@" 2>&1 | while IFS= read -r line; do logger "$line"; done
-    exit $?
+    flash_status=$(
+        # Keep the native exit status separate from the log pipeline.
+        exec 3>&1
+        {
+            /usr/bin/FlashApp "$@" 2>&1 3>&-
+            printf '%s\n' "$?" >&3
+        } | while IFS= read -r line || [ -n "$line" ]; do logger "$line"; done 3>&-
+    )
+    exit "$flash_status"
 fi
 
 # Keep the flash worker less aggressive so it does not starve the parent media process.

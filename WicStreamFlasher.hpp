@@ -37,17 +37,21 @@ struct WicStreamResult {
 };
 
 using WicStreamProgress = std::function<void(std::uint64_t, std::uint64_t)>;
+using WicStreamWriteStart = std::function<void()>;
 
 /**
  * @brief Stream a .wic image to the boot and rootfs partitions of a Raspberry Pi 4.
  * @param image_path Path to the .wic image file.
  * @param rootfs_device Path to the rootfs partition block device (e.g., "/dev/mmcblk0p3").
  * @param progress Optional callback to report progress; receives bytes written and total bytes.
+ * @param on_write_start Optional callback invoked once immediately before the first partition write,
+ * after initial image, partition-table, and target-capacity checks succeed.
  * @return WicStreamResult indicating success or failure, with details.
  */
 WicStreamResult stream_wic_image(const std::string& image_path,
                                  const std::string& rootfs_device,
-                                 const WicStreamProgress& progress = {});
+                                 const WicStreamProgress& progress = {},
+                                 const WicStreamWriteStart& on_write_start = {});
 
 /**
  * @brief Unmount every mount point of a configured rootfs bank so it can be opened exclusively.
