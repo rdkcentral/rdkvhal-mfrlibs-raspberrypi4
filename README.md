@@ -38,6 +38,14 @@ For example, enable both optional HAL features with
 The HAL lock option does not control `FlashApp`'s own lock.
 The native HAL worker uses the same flash lock as the CLI, preventing concurrent
 updates between the two entry points.
+Both native flashing and boot-pattern changes also take a stable, non-blocking
+boot-state lock at `/var/run/mfr_boot_state.lock`. A busy lock returns
+`mfrERR_OPERATION_NOT_SUPPORTED` instead of waiting inside a callback. The lock
+covers boot backup, replacement, rollback, bank selection, and configuration
+updates; the lock file is never deleted or replaced.
+Before unmounting or writing, the flasher requires exactly one on-disk `root=`
+argument matching the running bank. A pending bank switch rejects further
+updates until reboot or manual recovery.
 
 `mfrWriteImage()` returns an error without callbacks if validation, reservation,
 or worker creation fails. Success means the request was accepted, not that the
@@ -45,7 +53,9 @@ update finished. The owned worker sends `STARTED` notifications at the requested
 interval, then exactly one `COMPLETED` or `ABORTED` notification; post-start
 failures are reported through the callback rather than changing the API return.
 An interval of zero delivers only the final notification. Keep callback code
-and caller-owned callback resources alive until completion. Callbacks must not
+and caller-owned callback resources alive until completion, and initialize them
+before calling the API: the worker may notify during the call, before it returns.
+Callbacks run on worker threads, never inline on the API caller. Callbacks must not
 throw C++ exceptions. `mfr_term()` waits for the worker and all callbacks before
 releasing library resources; calling it from a flash callback is rejected to
 avoid self-join deadlocks. Do not unload the library before termination completes.

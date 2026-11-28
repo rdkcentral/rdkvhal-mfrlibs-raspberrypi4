@@ -23,6 +23,7 @@
 
 #pragma once
 #include "FlashConfig.hpp"
+#include "BootStateLock.h"
 #include "WicStreamFlasher.hpp"
 #include <iostream>
 #include <fstream>
@@ -69,8 +70,9 @@ namespace fs = std::filesystem;
 
 /**
  * @brief Reports mfrWriteImage() style upgrade status through mfrUpgradeStatusNotify_t.
- * Phase changes are reported immediately, with the current phase and percentage repeated
- * every notify.interval seconds. An interval of 0 reports only the final result.
+ * CLI phase changes are reported immediately and repeated every notify.interval seconds.
+ * HAL mode repeats STARTED instead; its initial notification is issued by the bridge.
+ * An interval of 0 reports only the final result.
  * finish() always delivers exactly one final
  * mfrUPGRADE_PROGRESS_COMPLETED or mfrUPGRADE_PROGRESS_ABORTED callback.
  */
@@ -219,6 +221,7 @@ private:
     int m_loop_control_file_descriptor = FlashConfig::INVALID_FILE_DESCRIPTOR;
     int m_loop_device_file_descriptor = FlashConfig::INVALID_FILE_DESCRIPTOR;
     int m_lock_file_descriptor = FlashConfig::INVALID_FILE_DESCRIPTOR;
+    int m_boot_state_lock_descriptor = FlashConfig::INVALID_FILE_DESCRIPTOR;
     std::string m_boot_image_staging_path;
 
     bool m_is_critical_update_phase = false;
@@ -361,6 +364,21 @@ private:
         return true;
     }
 
+    static bool read_rootfs_selection(std::istream& command_line, std::string& root_device)
+    {
+        std::string argument;
+        std::size_t root_argument_count = 0;
+        root_device.clear();
+        while (command_line >> argument) {
+            if (argument.rfind("root=", 0) == 0) {
+                ++root_argument_count;
+                root_device = argument.substr(5);
+            }
+        }
+        return !command_line.bad() && command_line.eof() &&
+               root_argument_count == 1 && !root_device.empty();
+    }
+
     /**
      * @brief Determine the passive root filesystem device based on the current active device.
      * This function reads the command line from /proc/cmdline to identify the active root filesystem device.
@@ -369,25 +387,13 @@ private:
     bool get_rootfs_devices(std::string& active_rootfs_device, std::string& passive_rootfs_device)
     {
         std::ifstream proc_command_line(FlashConfig::PROC_COMMAND_LINE_PATH);
-        std::string command_line;
-        if (!proc_command_line || !std::getline(proc_command_line, command_line)) {
+        std::string root_argument;
+        if (!proc_command_line || !read_rootfs_selection(proc_command_line, root_argument)) {
             std::cerr << FlashConfig::LOG_TAG << "Failed to read active root device from "
                       << FlashConfig::PROC_COMMAND_LINE_PATH << std::endl;
             return false;
         }
 
-        std::istringstream command_line_stream(command_line);
-        std::string argument;
-        std::string root_argument;
-        while (command_line_stream >> argument) {
-            if (argument.rfind("root=", 0) == 0) {
-                if (!root_argument.empty()) {
-                    std::cerr << FlashConfig::LOG_TAG << "Multiple root= arguments found in kernel command line." << std::endl;
-                    return false;
-                }
-                root_argument = argument.substr(5);
-            }
-        }
         if (root_argument == FlashConfig::ROOTFS_BANK_A_DEVICE) {
             active_rootfs_device = FlashConfig::ROOTFS_BANK_A_DEVICE;
             passive_rootfs_device = FlashConfig::ROOTFS_BANK_B_DEVICE;
@@ -824,6 +830,15 @@ private:
         status_reporter.set_phase(mfrUPGRADE_PROGRESS_VERIFYING, 0);
         check_termination_requested();
         verify_boot_mount();
+        m_boot_state_lock_descriptor = boot_state_lock();
+        if (m_boot_state_lock_descriptor < 0) {
+            const int lock_error = errno;
+            std::cerr << FlashConfig::LOG_TAG << "Unable to lock boot state: "
+                      << std::strerror(lock_error) << std::endl;
+            return fail(lock_error == EAGAIN || lock_error == EWOULDBLOCK
+                            ? mfrERR_OPERATION_NOT_SUPPORTED : mfrERR_WRITE_FLASH_FAILED,
+                        "Boot state could not be locked; retry after other boot operations finish");
+        }
         if (fs::exists(FlashConfig::BOOT_BACKUP_DIRECTORY)) {
             throw std::runtime_error(std::string("Existing boot backup requires manual recovery or removal: ") +
                                      FlashConfig::BOOT_BACKUP_DIRECTORY);
@@ -837,6 +852,21 @@ private:
         std::cout << FlashConfig::LOG_TAG << "Active root filesystem: " << active_rootfs_device
                   << "; passive root filesystem: " << passive_rootfs_device << std::endl;
 
+        std::ifstream boot_command_line(FlashConfig::BOOT_COMMAND_LINE_PATH);
+        if (!boot_command_line) {
+            return fail(mfrERR_UPDATE_BOOT_PARAMS_FAILED, "Unable to read next-boot rootfs selection");
+        }
+        std::string next_rootfs_device;
+        if (!read_rootfs_selection(boot_command_line, next_rootfs_device)) {
+            return fail(mfrERR_UPDATE_BOOT_PARAMS_FAILED,
+                        "Boot command line must contain exactly one readable root= argument");
+        }
+        boot_command_line.close();
+        if (next_rootfs_device != active_rootfs_device) {
+            return fail(mfrERR_OPERATION_NOT_SUPPORTED,
+                        "Next-boot rootfs differs from the running bank; reboot or recover before retrying");
+        }
+
         // The passive bank (e.g. /root2) is mounted read-write at boot; raw writes require it unmounted.
         std::string unmount_error;
         int unmount_error_code = 0;
@@ -848,6 +878,8 @@ private:
         // Prepare the boot directory for flashing by creating a backup and staging the new contents.
         fs::create_directories(FlashConfig::BOOT_MOUNT_DIRECTORY);
         fs::create_directories(FlashConfig::BOOT_BACKUP_DIRECTORY);
+        // /boot is untouched until replacement starts, so this run's backup is disposable until then.
+        m_remove_boot_backup = true;
         verify_boot_mount();
         copy_tree_with_progress(FlashConfig::BOOT_DIRECTORY, FlashConfig::BOOT_BACKUP_DIRECTORY,
                                 status_reporter, 0, 40);
@@ -897,6 +929,7 @@ private:
                       << m_loop_device_path << ": " << std::strerror(error_number) << std::endl;
             return fail(mfrERR_BAD_IMAGE_HEADER, "Staged boot partition mount failed");
         }
+        m_remove_boot_backup = false;
         m_boot_update_started = true;
         try {
             replace_boot_contents(FlashConfig::BOOT_MOUNT_DIRECTORY, &status_reporter);
@@ -1012,8 +1045,8 @@ public:
         } else {
             std::cerr << FlashConfig::LOG_TAG << "Flashing process failed: " << failure_reason
                       << " (error " << flash_result << ")." << std::endl;
-            cleanup();
         }
+        cleanup();
         status_reporter.finish(flash_result, failure_reason);
 
         return flash_result;
@@ -1082,6 +1115,14 @@ public:
                 std::cerr << FlashConfig::LOG_TAG << "Failed to remove temporary root: "
                           << remove_error.message() << std::endl;
             }
+        }
+        if (m_boot_state_lock_descriptor >= 0) {
+            if (boot_state_unlock(m_boot_state_lock_descriptor) != 0) {
+                const int unlock_error = errno;
+                std::cerr << FlashConfig::LOG_TAG << "Failed to release boot-state lock: "
+                          << std::strerror(unlock_error) << std::endl;
+            }
+            m_boot_state_lock_descriptor = FlashConfig::INVALID_FILE_DESCRIPTOR;
         }
         if (m_lock_file_descriptor >= 0) {
             ::flock(m_lock_file_descriptor, LOCK_UN);

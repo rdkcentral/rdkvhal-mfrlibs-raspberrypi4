@@ -31,6 +31,7 @@ extern "C" {
 #endif
 
 /* An error rejects the request without callbacks. Success accepts asynchronous work. */
+/* Worker callbacks may run during this call; initialize caller state beforehand. */
 mfrError_t native_flash_start(const char *image_path, mfrUpgradeStatusNotify_t notify);
 
 /* Wait for the worker and all callbacks before releasing HAL caller resources. */

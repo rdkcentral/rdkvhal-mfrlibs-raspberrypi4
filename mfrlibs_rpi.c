@@ -39,6 +39,7 @@
 #include <mfrTypes.h>
 #include <mfr_wifi_types.h>
 #include <mfr_wifi_api.h>
+#include "BootStateLock.h"
 
 #ifdef USE_NATIVE_FLASHER
 #include "NativeFlashBridge.h"
@@ -1132,52 +1133,52 @@ static mfrError_t updateBootConfigFile(const char *act_led_dtparam)
     size_t newSize = 0;
     int written = 0;
     const char *key = "dtparam=act_led_trigger=";
+    int boot_lock_descriptor = -1;
+    int backup_created = 0;
 
     if (!act_led_dtparam || !isValidActLEDParam(act_led_dtparam)) {
         mfrlib_log("updateBootConfigFile invalid input or unsupported parameter\n");
         return mfrERR_INVALID_PARAM;
     }
 
-    // Open and exclusively lock the file first so that backup, modification,
-    // and any restore all happen atomically with respect to other flock() callers.
-    // flock() is advisory; all writers must cooperate by also calling flock().
+    boot_lock_descriptor = boot_state_lock();
+    if (boot_lock_descriptor < 0) {
+        int lock_error = errno;
+        mfrlib_log("updateBootConfigFile boot-state lock failed: %d\n", lock_error);
+        return lock_error == EAGAIN || lock_error == EWOULDBLOCK
+            ? mfrERR_OPERATION_NOT_SUPPORTED : mfrERR_WRITE_FLASH_FAILED;
+    }
     fp = fopen(BOOT_CONFIG_FILE, "r+");
     if (NULL == fp) {
         mfrlib_log("updateBootConfigFile fopen() error for %s\n", BOOT_CONFIG_FILE);
-        return mfrERR_WRITE_FLASH_FAILED;
-    }
-    if (flock(fileno(fp), LOCK_EX) != 0) {
-        mfrlib_log("updateBootConfigFile flock() error for %s\n", BOOT_CONFIG_FILE);
-        fclose(fp);
-        return mfrERR_WRITE_FLASH_FAILED;
+        retVal = mfrERR_WRITE_FLASH_FAILED;
+        goto cleanup;
     }
 
     // Back up the original file while holding the lock.
     if (copyFile(BOOT_CONFIG_FILE, BOOT_CONFIG_BACKUP_FILE) != 0) {
         mfrlib_log("updateBootConfigFile failed to create backup at %s\n", BOOT_CONFIG_BACKUP_FILE);
-        fclose(fp);
-        return mfrERR_WRITE_FLASH_FAILED;
+        retVal = mfrERR_WRITE_FLASH_FAILED;
+        goto cleanup;
     }
+    backup_created = 1;
 
     if (fseek(fp, 0, SEEK_END) != 0) {
-        fclose(fp);
-        remove(BOOT_CONFIG_BACKUP_FILE);
-        return mfrERR_WRITE_FLASH_FAILED;
+        retVal = mfrERR_WRITE_FLASH_FAILED;
+        goto cleanup;
     }
     long fsize = ftell(fp);
     if (fsize < 0) {
-        fclose(fp);
-        remove(BOOT_CONFIG_BACKUP_FILE);
-        return mfrERR_WRITE_FLASH_FAILED;
+        retVal = mfrERR_WRITE_FLASH_FAILED;
+        goto cleanup;
     }
     rewind(fp);
 
     // Allocate buffer large enough for original content plus a possible new line.
     fileContents = (char *)malloc((size_t)fsize + MAX_BUF_LEN + 2);
     if (!fileContents) {
-        fclose(fp);
-        remove(BOOT_CONFIG_BACKUP_FILE);
-        return mfrERR_WRITE_FLASH_FAILED;
+        retVal = mfrERR_WRITE_FLASH_FAILED;
+        goto cleanup;
     }
 
     // Read line by line; replace dtparam=act_led_trigger= if found, else append later.
@@ -1226,10 +1227,16 @@ cleanup:
     free(line);
     free(fileContents);
     if (fp) {
-        fclose(fp); // releases flock
+        fclose(fp);
     }
-    remove(BOOT_CONFIG_BACKUP_FILE);
+    if (backup_created) {
+        remove(BOOT_CONFIG_BACKUP_FILE);
+    }
     sync();
+    if (boot_state_unlock(boot_lock_descriptor) != 0) {
+        mfrlib_log("updateBootConfigFile failed to release boot-state lock: %d\n", errno);
+        retVal = mfrERR_WRITE_FLASH_FAILED;
+    }
     return retVal;
 }
 
@@ -1247,6 +1254,7 @@ cleanup:
  * @retval mfrERR_INVALID_PARAM            - Parameter passed to this function is invalid
  * @retval mfrERR_WRITE_FLASH_FAILED       - Flash write failed
  * @retval mfrERR_FLASH_VERIFY_FAILED      - Flash verification failed
+ * @retval mfrERR_OPERATION_NOT_SUPPORTED  - Another boot-state operation is active
  *
  * @pre  mfr_init() should be called before calling this API. If this precondition is not met, the API will return mfrERR_NOT_INITIALIZED.
  * @warning  This API is Not thread safe
@@ -1543,11 +1551,20 @@ mfrError_t mfr_term(void)
  *    3) All upgrades should be done in the alternate bank. The current bank should not be disturbed
  *
  *    State Transition:
- *    0) Before the API is invoked, the Upgrade process should be in PROGRESS_NOT_STARTED state
- *    1) After the API returns with success, the Upgrade process moves to PROGRESS_STARTED state
- *    2) After the API returns with error,   the Upgrade process stays in PROGRESS_NOT_STARTED state. Notify function will not be invoked
+ *    0) A new request starts in PROGRESS_NOT_STARTED; a busy rejection does not change an active update.
+ *    1) Acceptance moves the Upgrade process to PROGRESS_STARTED; success returns after worker creation,
+ *       not after flashing. Worker callbacks may begin during this call, before it returns.
+ *    2) An error return leaves this request in PROGRESS_NOT_STARTED and invokes no callback for it.
  *    3) The notify function is called at regular interval with process = PROGRESS_STARTED
  *    4) The last invocation of notify function should have either progress = PROGRESS_COMPLETED or progress = PROGRESS_ABORTED with error code set
+ *       Post-acceptance failures are reported by that callback, not by an API error return.
+ *       An interval of zero suppresses nonterminal notifications, but still reports the final result.
+ *
+ * @note Initialize callback state before invoking this API and keep it valid until completion.
+ * Callbacks run on worker threads, never inline on the calling thread. A return error rejects
+ * this request without invoking its callback; a busy rejection does not stop an existing update.
+ * STARTED or the final notification may arrive before return; success only acknowledges acceptance
+ * and must not overwrite terminal state already observed by the callback.
  *
  *  @note mfrWriteImage() should work without any issue when device transition to DEEPSLEEP state and Wakeup. During DEEPSLEEP state processor will
  * cache all the pc and stack state and will enter to low power state. On wakeup system will use the saved pc and stack and resume from the same point.
@@ -1604,6 +1621,7 @@ mfrError_t mfrWriteImage(const char *name,  const char *path, mfrImageType_t typ
     }
     return native_flash_start(ota_image_path, notify);
 #else
+    (void)notify;
     return mfrERR_OPERATION_NOT_SUPPORTED;
 #endif
 }

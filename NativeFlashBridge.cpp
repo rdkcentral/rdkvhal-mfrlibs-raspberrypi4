@@ -79,7 +79,8 @@ public:
         m_busy = true;
         try {
             m_worker = std::thread([this, processor = std::move(processor), worker_notify]() mutable {
-                // Do not run callbacks until the accepting call has committed the worker.
+                // Wait until start() has stored m_worker so wait() can recognize this thread.
+                // This is not an API-return barrier: callbacks may precede native_flash_start()'s return.
                 {
                     std::lock_guard<std::mutex> start_lock(m_mutex);
                 }

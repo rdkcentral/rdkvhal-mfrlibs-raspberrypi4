@@ -62,7 +62,7 @@ else()
     message(STATUS "GIT_SHA is not set")
 endif()
 
-add_library(RDKMfrLib SHARED mfrlibs_rpi.c)
+add_library(RDKMfrLib SHARED mfrlibs_rpi.c BootStateLock.c BootStateLock.h)
 # Preserve the previous Libtool default SONAME and library version.
 set_target_properties(RDKMfrLib PROPERTIES VERSION 0.0.0 SOVERSION 0)
 target_include_directories(RDKMfrLib PUBLIC ${RDKMFRLIBS_INCLUDE_DIRS})
@@ -84,7 +84,7 @@ add_executable(mfrHalUtility mfrlib_utility.c)
 target_link_libraries(mfrHalUtility PRIVATE RDKMfrLib)
 
 add_executable(FlashApp FlashApp.cpp FlashProcessor.hpp FlashConfig.hpp
-    WicStreamFlasher.cpp WicStreamFlasher.hpp)
+    WicStreamFlasher.cpp WicStreamFlasher.hpp BootStateLock.c BootStateLock.h)
 target_include_directories(FlashApp PRIVATE ${RDKMFRLIBS_INCLUDE_DIRS})
 target_link_libraries(FlashApp PRIVATE PkgConfig::LIBARCHIVE Threads::Threads)
 

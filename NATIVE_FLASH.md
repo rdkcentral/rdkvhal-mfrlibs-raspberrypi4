@@ -66,8 +66,10 @@ The HAL entry point is different: `mfrWriteImage()` uses the C-callable bridge
 in `NativeFlashBridge.cpp` and returns after synchronous input checks, lock
 reservation, and worker creation. An error return never issues callbacks.
 After acceptance, the worker owns the processor, image path, and a copy of the
-notification configuration. Nonterminal HAL callbacks report only `STARTED`;
-the CLI's `NOT_STARTED`, `VERIFYING`, and `FLASHING` phases are not forwarded.
+notification configuration. Callbacks run on worker threads and may begin during
+the accepting API call, before it returns, so caller resources must be ready
+before invocation. Nonterminal HAL callbacks report only `STARTED`; the CLI's
+`NOT_STARTED`, `VERIFYING`, and `FLASHING` phases are not forwarded.
 Post-start failures produce `ABORTED` without changing the successful API return.
 An interval of zero still delivers only the final result. The HAL worker installs
 no process signal handlers. `mfr_term()` waits for work and callbacks to finish;
@@ -118,6 +120,10 @@ decrease, and 100% is reserved for successful completion.
    `/dev/mmcblk0p2` and `/dev/mmcblk0p3` are accepted. The other configured
    bank is selected as the passive target. Missing, duplicate, or unsupported
    root arguments fail closed.
+   The flasher takes `/var/run/mfr_boot_state.lock` and requires exactly one
+   readable `root=` argument in `/boot/cmdline.txt` matching that running bank.
+   If a completed update has selected the other bank, reboot or recover before
+   retrying. This check happens before passive-bank unmounting or any writes.
 4. Unmounts every mount point of the passive bank (for example `/root2`, which
    is mounted read-write at boot). Mounts are removed newest first with a normal
    (non-lazy) unmount, and the pass repeats until the device is absent from
@@ -154,6 +160,12 @@ decrease, and 100% is reserved for successful completion.
    `/boot/first_use_date.txt` in place, including its FAT creation time; an image
    or backup entry with that name is not copied over the device-specific marker.
    A failed restoration retains the backup and reports its location for recovery.
+   The stable boot-state lock stays held through backup, streaming, replacement,
+   rollback, the bank switch, and cleanup. `mfrSetBootloaderPattern()` uses the
+   same lock for its entire configuration backup/update/restore sequence.
+   Concurrent boot changes return `mfrERR_OPERATION_NOT_SUPPORTED`, rather than
+   blocking a notification thread. Cleanup releases the lock before the final
+   callback; the lock file itself is never unlinked.
 10. Leaves the critical phase, reports the final status, and processes any
    deferred termination signal.
 
@@ -194,8 +206,11 @@ permissions, or unavailable CPUs do not by themselves abort the update.
 | Boot files | `/boot`, `/boot/cmdline.txt` |
 | Loop device control | `/dev/loop-control`, with devices named `/dev/loop<N>` |
 | Lock file | `/var/run/flash_app.lock` |
+| Shared boot-state lock | `/var/run/mfr_boot_state.lock` (also used by the HAL boot-pattern writer) |
 | Mounted filesystem | `vfat` for the staged boot partition |
 
+The shared boot-state lock path is defined in the C-compatible `BootStateLock.h`;
+both the CLI and HAL compile `BootStateLock.c`, including native-disabled HAL builds.
 The paths and CPU numbers are compile-time constants; this implementation
 does not read them from a runtime configuration file.
 
