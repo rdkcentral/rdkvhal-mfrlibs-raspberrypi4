@@ -3,6 +3,89 @@ RDKV IARMMGRS MFR HAL Implementation of RPi4
 
 The implementation adheres to the IARMMGRS MFR HAL Interface (HALIF) requirements.
 
+### Building with CMake
+
+This is a Linux-targeted CMake project. Building requires CMake 3.16 or newer,
+C and C++ compilers (C99 and C++17), pkg-config, libarchive development files,
+and the RDK MFR HAL and IARM headers.
+
+```sh
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib
+cmake --build build
+DESTDIR="$PWD/staging" cmake --install build
+```
+
+The build produces `libRDKMfrLib.so`, `mfrHalUtility`, and `FlashApp`. The staged
+installation above places the library under `staging/usr/lib` and both
+executables under `staging/usr/bin`. The library retains the previous
+`libRDKMfrLib.so.0` SONAME and `0.0.0` library version.
+`FlashApp` keeps its blocking CLI interface. By default, the HAL also builds
+the C-callable `NativeFlashBridge.cpp` and `WicStreamFlasher.cpp`, so
+`mfrWriteImage()` accepts work asynchronously without compiling the C HAL as C++.
+Both native consumers link libarchive, threads, and `stdc++fs` when needed.
+The shell wrapper is not installed by the build, matching the previous behavior.
+
+| CMake option | Default | Purpose |
+| --- | --- | --- |
+| `ENABLE_THERMAL_PROTECTION` | `OFF` | Includes the HAL thermal protection functions. |
+| `ENABLE_SINGLE_INSTANCE_LOCK` | `OFF` | Enables the HAL single-instance lock. |
+| `ENABLE_NATIVE_FLASHER` | `ON` | Enables asynchronous native OTA flashing through `mfrWriteImage()`. `OFF` leaves that HAL API unsupported; the CLI is still built. |
+| `RDKMFRLIBS_INCLUDE_DIRS` | RDK header directories under the compiler sysroot's `/usr/include` | Semicolon-separated HAL and IARM include directories. |
+| `RDKMFRLIBS_LIBS` | Empty | Semicolon-separated additional HAL libraries. |
+
+For example, enable both optional HAL features with
+`-DENABLE_THERMAL_PROTECTION=ON -DENABLE_SINGLE_INSTANCE_LOCK=ON`.
+The HAL lock option does not control `FlashApp`'s own lock.
+The native HAL worker uses the same flash lock as the CLI, preventing concurrent
+updates between the two entry points.
+Both native flashing and boot-pattern changes also take a stable, non-blocking
+boot-state lock at `/var/run/mfr_boot_state.lock`. A busy lock returns
+`mfrERR_OPERATION_NOT_SUPPORTED` instead of waiting inside a callback. The lock
+covers boot backup, replacement, rollback, bank selection, and configuration
+updates; the lock file is never deleted or replaced.
+Before unmounting or writing, the flasher requires exactly one on-disk `root=`
+argument matching the running bank. A pending bank switch rejects further
+updates until the device reboots into the new bank.
+
+`mfrWriteImage()` returns an error without callbacks if validation, reservation,
+or worker creation fails. Success means the request was accepted, not that the
+update finished. The owned worker sends `STARTED` notifications at the requested
+interval, then exactly one `COMPLETED` or `ABORTED` notification; post-start
+failures are reported through the callback rather than changing the API return.
+An interval of zero delivers only the final notification. Keep callback code
+and caller-owned callback resources alive until completion, and initialize them
+before calling the API: the worker may notify during the call, before it returns.
+Callbacks run on worker threads, never inline on the API caller. Callbacks must not
+throw C++ exceptions. `mfr_term()` waits for the worker and all callbacks before
+releasing library resources; calling it from a flash callback is rejected to
+avoid self-join deadlocks. Do not unload the library before termination completes.
+
+Refer [NATIVE_FLASH.md](./NATIVE_FLASH.md) for `FlashApp` implementation details.
+
+For cross-compilation, initialize the target SDK environment and supply its
+CMake toolchain file:
+
+```sh
+cmake -S . -B build \
+    -DCMAKE_TOOLCHAIN_FILE=/path/to/sdk/toolchain.cmake \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib
+cmake --build build
+```
+
+The toolchain should configure `CMAKE_SYSROOT`, the target C/C++ compilers, and
+target dependency lookup. Ensure pkg-config uses the target's libarchive
+metadata, not the build host's. Override `RDKMFRLIBS_INCLUDE_DIRS` if the SDK
+stores the RDK headers elsewhere. Filesystem checks link but do not run target
+executables; older GCC toolchains automatically link `stdc++fs` when needed.
+
+CMake replaces Autotools: `autoreconf`, `configure`, and Libtool `.la` files
+are no longer provided. External Yocto recipes must switch from
+`inherit autotools` to `inherit cmake pkgconfig` and add `libarchive` to
+`DEPENDS`. Replace `--enable-thermalprotection` with
+`-DENABLE_THERMAL_PROTECTION=ON` and `--enable-single-instance-lock` with
+`-DENABLE_SINGLE_INSTANCE_LOCK=ON`.
+
 ### Serialized Data Support
 
 This repository is an STB-oriented MFR HAL implementation. Support for `PANEL_SERIALIZATION_TYPES` is intentionally out of scope and those values are not accepted by the serialized-type validator on this target.

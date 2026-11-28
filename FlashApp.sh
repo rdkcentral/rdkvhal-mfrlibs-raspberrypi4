@@ -25,11 +25,44 @@ EXTBLOCK="$PERSISTENT_PATH/ota/extblock"
 WICIMAGEFILE="$PERSISTENT_PATH/ota/wicimage"
 
 logger() {
-    echo "$(date) FlashApp.sh > $1" | tee -a $FLASHAPPLOGFILE
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    printf '%s FlashApp.sh > %s\n' "$timestamp" "$1" >> "$FLASHAPPLOGFILE"
+    printf '%s FlashApp.sh > %s\n' "$timestamp" "$1" >&2
+}
+
+# If FlashApp binary exists, then use it; else use the FlashApp.sh script.
+if [ -f /usr/bin/FlashApp ]; then
+    logger "Using the FlashApp binary for flashing."
+    # Redirect the logs to logger.
+    flash_status=$(
+        # Keep the native exit status separate from the log pipeline.
+        exec 3>&1
+        {
+            /usr/bin/FlashApp "$@" 2>&1 3>&-
+            printf '%s\n' "$?" >&3
+        } | while IFS= read -r line || [ -n "$line" ]; do logger "$line"; done 3>&-
+    )
+    exit "$flash_status"
+fi
+
+# Keep the flash worker less aggressive so it does not starve the parent media process.
+# This only affects the child commands used in this script, not the parent process.
+run_reduced_priority() {
+    if command -v nice >/dev/null 2>&1; then
+        set -- nice -n 10 "$@"
+    fi
+    if command -v ionice >/dev/null 2>&1; then
+        set -- ionice -c 3 "$@"
+    fi
+    if command -v taskset >/dev/null 2>&1; then
+        set -- taskset -c 2,3 "$@"
+    fi
+    "$@"
 }
 
 # Check if all the commands used in this script are available
-commandsRequired="date echo exit ls grep mkdir tar cp rm sync stat losetup mount umount reboot df sed awk md5sum trap mountpoint"
+commandsRequired="date echo exit ls grep mkdir tar cp rm sync stat losetup mount umount reboot df sed awk md5sum trap mountpoint printf"
 for cmd in $commandsRequired; do
     if ! command -v $cmd > /dev/null; then
         logger "Required command '$cmd' not found; cannot proceed, exiting."
@@ -64,7 +97,7 @@ if [ $(ls $cloudFWFile | grep -c "tar.gz") -eq 1 ]; then
     fi
     logger "Extracting the compressed firmware image file into '$WICIMAGEFILE'"
     mkdir -p $WICIMAGEFILE
-    tar -xzf $cloudFWFile -C $WICIMAGEFILE && sync
+    run_reduced_priority tar -xzf $cloudFWFile -C $WICIMAGEFILE && sync
     if [ $? -ne 0 ]; then
         logger "Failed to extract the compressed firmware image file; cannot proceed, exiting."
         rm -rf $WICIMAGEFILE $cloudFWFile && sync
@@ -156,7 +189,7 @@ logger "target_rootfs_mount_point: $target_rootfs_mount_point"
 # back-up the contents of /boot partition
 logger "Backing up the contents of '/boot' partition to '$old_boot_bkup'"
 rm -rf $old_boot_bkup/* && sync
-cp -ar /boot/* $old_boot_bkup/ && sync
+run_reduced_priority cp -ar /boot/* $old_boot_bkup/ && sync
 if [ $? -ne 0 ]; then
     logger "Failed to back-up the contents of '$ota_boot_mount_point' partition; cannot proceed, exiting."
     clean_up
@@ -224,7 +257,7 @@ else
     fi
     logger "Copying the contents of '$ota_rootfs_mount_point' to '$target_rootfs_mount_point'"
     rm -rf $target_rootfs_mount_point/* && sync
-    cp -ar $ota_rootfs_mount_point/* $target_rootfs_mount_point/ && sync
+    run_reduced_priority cp -ar $ota_rootfs_mount_point/* $target_rootfs_mount_point/ && sync
     if [ $? -ne 0 ]; then
         logger "Failed to copy the contents of '$ota_rootfs_mount_point' to '$target_rootfs_mount_point'; revert and abort."
     else
@@ -250,7 +283,7 @@ if [ $? -ne 0 ]; then
 else
     logger "Copying the contents of '$ota_boot_mount_point' to '/boot' after cleaning it."
     rm -rf /boot/* && sync
-    cp -ar $ota_boot_mount_point/* /boot/ && sync
+    run_reduced_priority cp -ar $ota_boot_mount_point/* /boot/ && sync
     if [ $? -ne 0 ]; then
         logger "Failed to copy the contents of '$ota_boot_mount_point' to '/boot'; revert to old and abort."
         rm -rf /boot/* && sync && cp -ar $old_boot_bkup/* /boot/ && sync
