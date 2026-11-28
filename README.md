@@ -19,20 +19,36 @@ The build produces `libRDKMfrLib.so`, `mfrHalUtility`, and `FlashApp`. The stage
 installation above places the library under `staging/usr/lib` and both
 executables under `staging/usr/bin`. The library retains the previous
 `libRDKMfrLib.so.0` SONAME and `0.0.0` library version.
-`FlashProcessor.hpp` and `FlashConfig.hpp` are included by `FlashApp`;
-`WicStreamFlasher.cpp` is compiled into the executable.
+`FlashApp` keeps its blocking CLI interface. By default, the HAL also builds
+the C-callable `NativeFlashBridge.cpp` and `WicStreamFlasher.cpp`, so
+`mfrWriteImage()` accepts work asynchronously without compiling the C HAL as C++.
+Both native consumers link libarchive, threads, and `stdc++fs` when needed.
 The shell wrapper is not installed by the build, matching the previous behavior.
 
 | CMake option | Default | Purpose |
 | --- | --- | --- |
 | `ENABLE_THERMAL_PROTECTION` | `OFF` | Includes the HAL thermal protection functions. |
 | `ENABLE_SINGLE_INSTANCE_LOCK` | `OFF` | Enables the HAL single-instance lock. |
+| `ENABLE_NATIVE_FLASHER` | `ON` | Enables asynchronous native OTA flashing through `mfrWriteImage()`. `OFF` leaves that HAL API unsupported; the CLI is still built. |
 | `RDKMFRLIBS_INCLUDE_DIRS` | RDK header directories under the compiler sysroot's `/usr/include` | Semicolon-separated HAL and IARM include directories. |
 | `RDKMFRLIBS_LIBS` | Empty | Semicolon-separated additional HAL libraries. |
 
 For example, enable both optional HAL features with
 `-DENABLE_THERMAL_PROTECTION=ON -DENABLE_SINGLE_INSTANCE_LOCK=ON`.
 The HAL lock option does not control `FlashApp`'s own lock.
+The native HAL worker uses the same flash lock as the CLI, preventing concurrent
+updates between the two entry points.
+
+`mfrWriteImage()` returns an error without callbacks if validation, reservation,
+or worker creation fails. Success means the request was accepted, not that the
+update finished. The owned worker sends `STARTED` notifications at the requested
+interval, then exactly one `COMPLETED` or `ABORTED` notification; post-start
+failures are reported through the callback rather than changing the API return.
+An interval of zero delivers only the final notification. Keep callback code
+and caller-owned callback resources alive until completion. Callbacks must not
+throw C++ exceptions. `mfr_term()` waits for the worker and all callbacks before
+releasing library resources; calling it from a flash callback is rejected to
+avoid self-join deadlocks. Do not unload the library before termination completes.
 
 For cross-compilation, initialize the target SDK environment and supply its
 CMake toolchain file:

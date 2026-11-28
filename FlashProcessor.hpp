@@ -77,6 +77,7 @@ namespace fs = std::filesystem;
 class UpgradeStatusReporter {
 private:
     const mfrUpgradeStatusNotify_t m_notify;
+    const bool m_hal_notifications;
     std::mutex m_mutex;
     std::mutex m_callback_mutex;
     std::condition_variable m_stop_condition;
@@ -109,7 +110,7 @@ private:
             progress = m_progress;
             percentage = m_percentage;
         }
-        deliver(progress, mfrERR_NONE, "", percentage);
+        deliver(m_hal_notifications ? mfrUPGRADE_PROGRESS_STARTED : progress, mfrERR_NONE, "", percentage);
     }
 
     void report_periodically()
@@ -135,7 +136,8 @@ private:
     }
 
 public:
-    explicit UpgradeStatusReporter(const mfrUpgradeStatusNotify_t& notify) : m_notify(notify)
+    explicit UpgradeStatusReporter(const mfrUpgradeStatusNotify_t& notify, bool hal_notifications = false)
+        : m_notify(notify), m_hal_notifications(hal_notifications)
     {
         if (m_notify.cb && m_notify.interval > 0) {
             m_periodic_thread = std::thread(&UpgradeStatusReporter::report_periodically, this);
@@ -160,7 +162,7 @@ public:
             m_percentage = std::max(m_percentage, std::clamp(percentage, 0, 99));
             percentage = m_percentage;
         }
-        if (m_notify.cb && m_notify.interval > 0) {
+        if (m_notify.cb && m_notify.interval > 0 && !m_hal_notifications) {
             deliver(progress, mfrERR_NONE, "", percentage);
         }
     }
@@ -222,6 +224,7 @@ private:
     bool m_is_critical_update_phase = false;
     bool m_boot_update_started = false;
     bool m_remove_boot_backup = false;
+    bool m_is_prepared = false;
     const volatile std::sig_atomic_t* m_termination_signal = nullptr;
 
     void check_termination_requested() const
@@ -937,19 +940,17 @@ public:
     ~NativeFlashProcessor() noexcept { cleanup(); }
 
     /**
-     * @brief Stream the passive rootfs partition, update boot files, then switch root banks.
-     * Errors detected before flashing starts are returned without invoking notify.cb.
-     * With a positive interval, notify.cb reports NOT_STARTED, STARTED, VERIFYING, and FLASHING,
-     * followed by COMPLETED or ABORTED. Periodic callbacks report the current phase and measured
-     * percentage. An interval of 0 reports only the final result. The call blocks until flashing finishes.
-     * @param notify The upgrade status callback configuration.
-     * @return mfrERR_NONE if the flashing process was successful, otherwise the mfrError_t describing the failure.
+     * @brief Validate an update and reserve the instance lock without issuing callbacks.
+     * The processor owns the reservation until cleanup or destruction.
      */
-    mfrError_t flash(const mfrUpgradeStatusNotify_t& notify)
+    mfrError_t prepare(const mfrUpgradeStatusNotify_t& notify)
     {
         if (notify.interval < 0) {
             std::cerr << FlashConfig::LOG_TAG << "Notification interval cannot be negative." << std::endl;
             return mfrERR_INVALID_PARAM;
+        }
+        if (m_is_prepared) {
+            return mfrERR_NONE;
         }
         if (!lock_instance()) {
             return mfrERR_OPERATION_NOT_SUPPORTED;
@@ -973,7 +974,22 @@ public:
             return mfrERR_IMAGE_FILE_OPEN_FAILED;
         }
 
-        UpgradeStatusReporter status_reporter(notify);
+        m_is_prepared = true;
+        return mfrERR_NONE;
+    }
+
+    /**
+     * @brief Block until flashing finishes. The CLI gets detailed phase notifications;
+     * the HAL worker reports STARTED periodically and one final result.
+     */
+    mfrError_t flash(const mfrUpgradeStatusNotify_t& notify, bool hal_notifications = false)
+    {
+        const mfrError_t preparation_result = prepare(notify);
+        if (preparation_result != mfrERR_NONE) {
+            return preparation_result;
+        }
+
+        UpgradeStatusReporter status_reporter(notify, hal_notifications);
         status_reporter.set_phase(mfrUPGRADE_PROGRESS_NOT_STARTED, 0);
         status_reporter.set_phase(mfrUPGRADE_PROGRESS_STARTED, 0);
         std::string failure_reason;
@@ -1072,5 +1088,6 @@ public:
             ::close(m_lock_file_descriptor);
             m_lock_file_descriptor = FlashConfig::INVALID_FILE_DESCRIPTOR;
         }
+        m_is_prepared = false;
     }
 };

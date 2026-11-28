@@ -41,7 +41,7 @@
 #include <mfr_wifi_api.h>
 
 #ifdef USE_NATIVE_FLASHER
-#include "FlashProcessor.hpp"
+#include "NativeFlashBridge.h"
 #endif
 
 #define MAX_BUF_LEN 255
@@ -1515,6 +1515,14 @@ mfrError_t mfr_term(void)
         return mfrERR_NOT_INITIALIZED;
     }
 
+#ifdef USE_NATIVE_FLASHER
+    mfrError_t flash_wait_result = native_flash_wait();
+    if (flash_wait_result != mfrERR_NONE) {
+        mfrlib_log("mfr_term failed to wait for native flasher: %d\n", flash_wait_result);
+        return flash_wait_result;
+    }
+#endif
+
 #ifdef ENABLE_SINGLE_INSTANCE_LOCK
     if (releaseLock() == -1) {
         mfrlib_log("mfr_term releaseLock failed\n");
@@ -1589,14 +1597,15 @@ mfrError_t mfrWriteImage(const char *name,  const char *path, mfrImageType_t typ
 #ifdef USE_NATIVE_FLASHER
     mfrlib_log("mfrWriteImage using native Flasher implementation.\n");
     char ota_image_path[MAX_BUF_LEN];
-    if (snprintf(ota_image_path, sizeof(ota_image_path), "%s/%s", path, name) >= (int)sizeof(ota_image_path)) {
-        mfrlib_log("mfrWriteImage path too long\n");
+    int image_path_length = snprintf(ota_image_path, sizeof(ota_image_path), "%s/%s", path, name);
+    if (image_path_length < 0 || image_path_length >= (int)sizeof(ota_image_path)) {
+        mfrlib_log("mfrWriteImage failed to construct image path or path too long\n");
         return mfrERR_INVALID_PARAM;
     }
-    std::unique_ptr<NativeFlashProcessor> flash_processor = std::make_unique<NativeFlashProcessor>(ota_image_path);
-    return flash_processor->flash(notify);
-#endif
+    return native_flash_start(ota_image_path, notify);
+#else
     return mfrERR_OPERATION_NOT_SUPPORTED;
+#endif
 }
 
 /****************************** MFR WIFI APIs ********************************/

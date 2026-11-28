@@ -43,7 +43,7 @@ non-negative integer; invalid or extra arguments are rejected.
 ## Status Reporting
 
 `flash()` takes a `mfrUpgradeStatusNotify_t` and returns `mfrError_t`.
-The native flasher uses the HAL status types with richer phase notifications:
+The blocking CLI uses the HAL status types with richer phase notifications:
 
 - Errors found before flashing starts are returned without calling
   `notify.cb`: an active instance lock returns
@@ -61,6 +61,18 @@ The native flasher uses the HAL status types with richer phase notifications:
   `error_string`.
 - `flash()` blocks until the update finishes. `notify.cbData` is not passed to
   the callback because the HAL callback signature has no data argument.
+
+The HAL entry point is different: `mfrWriteImage()` uses the C-callable bridge
+in `NativeFlashBridge.cpp` and returns after synchronous input checks, lock
+reservation, and worker creation. An error return never issues callbacks.
+After acceptance, the worker owns the processor, image path, and a copy of the
+notification configuration. Nonterminal HAL callbacks report only `STARTED`;
+the CLI's `NOT_STARTED`, `VERIFYING`, and `FLASHING` phases are not forwarded.
+Post-start failures produce `ABORTED` without changing the successful API return.
+An interval of zero still delivers only the final result. The HAL worker installs
+no process signal handlers. `mfr_term()` waits for work and callbacks to finish;
+it cannot be called from a flash callback. Caller callback resources must remain
+valid until completion, and the library must not be unloaded before termination.
 
 `ABORTED` is an alternative to `COMPLETED`, not a normal success phase.
 `VERIFYING` covers initial input/archive checks, partition-table validation,
