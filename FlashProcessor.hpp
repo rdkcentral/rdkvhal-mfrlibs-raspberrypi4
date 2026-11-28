@@ -228,6 +228,11 @@ private:
     bool m_boot_update_started = false;
     bool m_remove_boot_backup = false;
     bool m_is_prepared = false;
+    // Shared staging paths are cleaned up only when this processor created or mounted them.
+    bool m_owns_temporary_mount_root = false;
+    bool m_owns_boot_mount_directory = false;
+    bool m_owns_boot_backup_directory = false;
+    bool m_is_boot_staging_mounted = false;
     const volatile std::sig_atomic_t* m_termination_signal = nullptr;
 
     void check_termination_requested() const
@@ -673,13 +678,15 @@ private:
         try {
             replace_boot_contents(FlashConfig::BOOT_BACKUP_DIRECTORY);
             m_boot_update_started = false;
-            m_remove_boot_backup = true;
+            // A journal that cannot be cleared still needs the backup for the next recovery.
+            m_remove_boot_backup = remove_boot_update_journal();
             std::cout << FlashConfig::LOG_TAG << "Restored " << FlashConfig::BOOT_DIRECTORY << " from backup." << std::endl;
             return true;
         } catch (const std::exception& exception) {
             std::cerr << FlashConfig::LOG_TAG << "Failed to restore " << FlashConfig::BOOT_DIRECTORY
-                      << " from backup; manual recovery required: " << exception.what()
-                      << ". Backup retained at " << FlashConfig::BOOT_BACKUP_DIRECTORY << std::endl;
+                      << " from backup: " << exception.what()
+                      << ". Backup and journal retained at " << FlashConfig::TEMPORARY_MOUNT_ROOT
+                      << "; the next update retries the restore." << std::endl;
             // Persist whatever was restored so a power loss does not leave /boot in an even older state.
             const int sync_error = sync_boot_filesystem();
             if (sync_error != 0) {
@@ -801,6 +808,195 @@ private:
         return true;
     }
 
+    static constexpr const char* JOURNAL_PHASE_REPLACING = "replacing";
+    static constexpr const char* JOURNAL_PHASE_SWITCHING = "switching";
+
+    /**
+     * @brief Atomically record the /boot update phase and the rootfs bank it switches to.
+     * The journal is on tmpfs: it only guards against a killed flasher and never survives a reboot.
+     * Throws on failure; no journal is left behind in that case.
+     */
+    static void write_boot_update_journal(const char* phase, const std::string& target_rootfs_device)
+    {
+        const std::string temporary_path = std::string(FlashConfig::BOOT_UPDATE_JOURNAL_PATH) + ".tmp";
+        const std::string contents = std::string(phase) + " " + target_rootfs_device + "\n";
+        int error = 0;
+        const int descriptor = ::open(temporary_path.c_str(),
+                                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                                      S_IRUSR | S_IWUSR);
+        if (descriptor < 0) {
+            error = errno;
+        } else {
+            std::size_t written = 0;
+            while (error == 0 && written < contents.size()) {
+                const ssize_t result = ::write(descriptor, contents.data() + written, contents.size() - written);
+                if (result > 0) {
+                    written += static_cast<std::size_t>(result);
+                } else if (result < 0 && errno != EINTR) {
+                    error = errno;
+                } else if (result == 0) {
+                    error = EIO;
+                }
+            }
+            if (::close(descriptor) != 0 && error == 0) {
+                error = errno;
+            }
+        }
+        if (error == 0 && ::rename(temporary_path.c_str(), FlashConfig::BOOT_UPDATE_JOURNAL_PATH) != 0) {
+            error = errno;
+        }
+        if (error != 0) {
+            ::unlink(temporary_path.c_str());
+            ::unlink(FlashConfig::BOOT_UPDATE_JOURNAL_PATH);
+            throw fs::filesystem_error("Failed to record boot update journal", FlashConfig::BOOT_UPDATE_JOURNAL_PATH,
+                                       std::error_code(error, std::generic_category()));
+        }
+    }
+
+    /** @return true when no journal remains. */
+    static bool remove_boot_update_journal() noexcept
+    {
+        if (::unlink(FlashConfig::BOOT_UPDATE_JOURNAL_PATH) != 0 && errno != ENOENT) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to remove boot update journal: "
+                      << std::strerror(errno) << std::endl;
+            return false;
+        }
+        return true;
+    }
+
+    static bool read_boot_update_journal(std::string& phase, std::string& target_rootfs_device)
+    {
+        std::ifstream journal(FlashConfig::BOOT_UPDATE_JOURNAL_PATH);
+        std::string extra;
+        if (!(journal >> phase >> target_rootfs_device) || (journal >> extra)) {
+            return false;
+        }
+        return (phase == JOURNAL_PHASE_REPLACING || phase == JOURNAL_PHASE_SWITCHING) &&
+               (target_rootfs_device == FlashConfig::ROOTFS_BANK_A_DEVICE ||
+                target_rootfs_device == FlashConfig::ROOTFS_BANK_B_DEVICE);
+    }
+
+    /**
+     * @brief Unmount every layer stacked on a stale mount point so its directory can be removed
+     * without deleting files of a still-mounted filesystem.
+     */
+    static bool unmount_stale_mount_point(const char* mount_point, std::string& reason)
+    {
+        constexpr int MAX_STACKED_MOUNTS = 8;
+        int unmount_error = EBUSY;
+        for (int attempt = 0; attempt < MAX_STACKED_MOUNTS; ++attempt) {
+            if (::umount(mount_point) != 0) {
+                unmount_error = errno;
+                break;
+            }
+        }
+        if (unmount_error != EINVAL && unmount_error != ENOENT) {
+            reason = std::string("Stale mount ") + mount_point + " could not be unmounted: " +
+                     std::strerror(unmount_error);
+            return false;
+        }
+        return true;
+    }
+
+    /** @brief Remove the legacy FlashApp.sh work area, including its persistent boot backup. */
+    static bool remove_legacy_state(std::string& reason)
+    {
+        for (const char* mount_point : FlashConfig::LEGACY_MOUNT_POINTS) {
+            if (!unmount_stale_mount_point(mount_point, reason)) {
+                return false;
+            }
+        }
+        std::error_code remove_error;
+        if (fs::exists(FlashConfig::LEGACY_STATE_ROOT, remove_error)) {
+            std::cout << FlashConfig::LOG_TAG << "Removing stale legacy update state at "
+                      << FlashConfig::LEGACY_STATE_ROOT << std::endl;
+            fs::remove_all(FlashConfig::LEGACY_STATE_ROOT, remove_error);
+        }
+        if (remove_error) {
+            reason = std::string("Stale legacy update state could not be removed: ") + remove_error.message();
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * @brief Remove a staging mount point left by an interrupted run, unmounting it first if a
+     * killed flasher left it mounted without a reboot.
+     */
+    static bool reclaim_boot_staging_directory(std::string& reason)
+    {
+        if (!unmount_stale_mount_point(FlashConfig::BOOT_MOUNT_DIRECTORY, reason)) {
+            return false;
+        }
+        std::error_code remove_error;
+        fs::remove_all(FlashConfig::BOOT_MOUNT_DIRECTORY, remove_error);
+        if (remove_error) {
+            reason = "Stale boot staging directory could not be removed: " + remove_error.message();
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * @brief Clear stale flasher state before a new backup is taken, so the device can always be reflashed.
+     * After a reboot /tmp is empty and only legacy persistent leftovers are removed. A journal (left by a
+     * flasher killed without a reboot) means /boot was being changed: the backup is restored first unless
+     * the bank switch had already been committed. Every stale backup is then deleted.
+     * Must be called with the instance and boot-state locks held.
+     */
+    mfrError_t recover_interrupted_update(std::string& reason)
+    {
+        if (!remove_legacy_state(reason) || !reclaim_boot_staging_directory(reason)) {
+            return mfrERR_WRITE_FLASH_FAILED;
+        }
+        std::error_code status_error;
+        const bool journal_exists = fs::exists(FlashConfig::BOOT_UPDATE_JOURNAL_PATH, status_error);
+        if (status_error) {
+            reason = "Boot update journal could not be inspected: " + status_error.message();
+            return mfrERR_WRITE_FLASH_FAILED;
+        }
+        if (journal_exists) {
+            std::string phase;
+            std::string target_rootfs_device;
+            bool switch_committed = false;
+            if (read_boot_update_journal(phase, target_rootfs_device) && phase == JOURNAL_PHASE_SWITCHING) {
+                std::ifstream boot_command_line(FlashConfig::BOOT_COMMAND_LINE_PATH);
+                std::string next_rootfs_device;
+                switch_committed = boot_command_line &&
+                                   read_rootfs_selection(boot_command_line, next_rootfs_device) &&
+                                   next_rootfs_device == target_rootfs_device;
+            }
+            if (switch_committed) {
+                std::cout << FlashConfig::LOG_TAG << "Previous update was committed before interruption; "
+                          << "discarding its boot backup." << std::endl;
+            } else {
+                std::cout << FlashConfig::LOG_TAG << "Previous update was interrupted while changing "
+                          << FlashConfig::BOOT_DIRECTORY << "; restoring it from backup." << std::endl;
+                if (!fs::is_directory(FlashConfig::BOOT_BACKUP_DIRECTORY, status_error)) {
+                    reason = std::string("Interrupted boot update has no backup; manual recovery required: ") +
+                             FlashConfig::BOOT_BACKUP_DIRECTORY;
+                    return mfrERR_WRITE_FLASH_FAILED;
+                }
+                if (!restore_boot_backup()) {
+                    reason = std::string("Interrupted boot update could not be restored; the next update retries; backup: ") +
+                             FlashConfig::BOOT_BACKUP_DIRECTORY;
+                    return mfrERR_WRITE_FLASH_FAILED;
+                }
+            }
+            if (!remove_boot_update_journal()) {
+                reason = "Boot update journal could not be cleared";
+                return mfrERR_WRITE_FLASH_FAILED;
+            }
+        }
+        m_remove_boot_backup = false;
+        fs::remove_all(FlashConfig::BOOT_BACKUP_DIRECTORY, status_error);
+        if (status_error) {
+            reason = "Stale boot backup could not be removed: " + status_error.message();
+            return mfrERR_WRITE_FLASH_FAILED;
+        }
+        return mfrERR_NONE;
+    }
+
     /**
      * @brief Run the flashing steps after the instance lock and image existence checks.
      * @param status_reporter Receives phase changes and measured work progress.
@@ -812,7 +1008,7 @@ private:
         const auto fail = [this, &failure_reason](mfrError_t error, const std::string& reason) {
             failure_reason = reason;
             if (m_boot_update_started && !m_remove_boot_backup) {
-                failure_reason += std::string("; manual recovery required; backup: ") +
+                failure_reason += std::string("; boot backup retained for recovery by the next update: ") +
                                   FlashConfig::BOOT_BACKUP_DIRECTORY;
             }
             return error;
@@ -839,9 +1035,10 @@ private:
                             ? mfrERR_OPERATION_NOT_SUPPORTED : mfrERR_WRITE_FLASH_FAILED,
                         "Boot state could not be locked; retry after other boot operations finish");
         }
-        if (fs::exists(FlashConfig::BOOT_BACKUP_DIRECTORY)) {
-            throw std::runtime_error(std::string("Existing boot backup requires manual recovery or removal: ") +
-                                     FlashConfig::BOOT_BACKUP_DIRECTORY);
+        std::string recovery_reason;
+        const mfrError_t recovery_result = recover_interrupted_update(recovery_reason);
+        if (recovery_result != mfrERR_NONE) {
+            return fail(recovery_result, recovery_reason);
         }
 
         std::string active_rootfs_device;
@@ -876,8 +1073,17 @@ private:
         }
 
         // Prepare the boot directory for flashing by creating a backup and staging the new contents.
-        fs::create_directories(FlashConfig::BOOT_MOUNT_DIRECTORY);
-        fs::create_directories(FlashConfig::BOOT_BACKUP_DIRECTORY);
+        const fs::path temporary_mount_root(FlashConfig::TEMPORARY_MOUNT_ROOT);
+        fs::create_directories(temporary_mount_root.parent_path());
+        m_owns_temporary_mount_root = fs::create_directory(temporary_mount_root);
+        if (!fs::create_directory(FlashConfig::BOOT_MOUNT_DIRECTORY)) {
+            return fail(mfrERR_WRITE_FLASH_FAILED, "Boot staging directory was created by another process");
+        }
+        m_owns_boot_mount_directory = true;
+        if (!fs::create_directory(FlashConfig::BOOT_BACKUP_DIRECTORY)) {
+            return fail(mfrERR_WRITE_FLASH_FAILED, "Boot backup directory was created by another process");
+        }
+        m_owns_boot_backup_directory = true;
         // /boot is untouched until replacement starts, so this run's backup is disposable until then.
         m_remove_boot_backup = true;
         verify_boot_mount();
@@ -929,6 +1135,8 @@ private:
                       << m_loop_device_path << ": " << std::strerror(error_number) << std::endl;
             return fail(mfrERR_BAD_IMAGE_HEADER, "Staged boot partition mount failed");
         }
+        m_is_boot_staging_mounted = true;
+        write_boot_update_journal(JOURNAL_PHASE_REPLACING, passive_rootfs_device);
         m_remove_boot_backup = false;
         m_boot_update_started = true;
         try {
@@ -936,7 +1144,9 @@ private:
         } catch (const std::exception& exception) {
             std::cerr << FlashConfig::LOG_TAG << "Failed to update " << FlashConfig::BOOT_DIRECTORY
                       << ": " << exception.what() << std::endl;
-            ::umount(FlashConfig::BOOT_MOUNT_DIRECTORY);
+            if (::umount(FlashConfig::BOOT_MOUNT_DIRECTORY) == 0) {
+                m_is_boot_staging_mounted = false;
+            }
             return restore_and_fail(mfrERR_WRITE_FLASH_FAILED, "Boot partition update failed");
         }
         if (::umount(FlashConfig::BOOT_MOUNT_DIRECTORY) != 0) {
@@ -945,14 +1155,18 @@ private:
                       << std::strerror(error_number) << std::endl;
             return restore_and_fail(mfrERR_WRITE_FLASH_FAILED, "Staged boot partition unmount failed");
         }
+        m_is_boot_staging_mounted = false;
 
         status_reporter.set_percentage(90);
+        write_boot_update_journal(JOURNAL_PHASE_SWITCHING, passive_rootfs_device);
         if (!update_boot_command_line(active_rootfs_device, passive_rootfs_device)) {
             return restore_and_fail(mfrERR_UPDATE_BOOT_PARAMS_FAILED, "Boot cmdline update failed");
         }
         status_reporter.set_percentage(99);
         m_boot_update_started = false;
         m_remove_boot_backup = true;
+        // A leftover "switching" journal is harmless: recovery sees the committed cmdline and discards it.
+        remove_boot_update_journal();
 
         // Clean up the OTA archive if it was a GZIP file and the flashing process completed successfully.
         if (is_gzip_archive(m_image_path)) {
@@ -1033,7 +1247,7 @@ public:
             std::cerr << FlashConfig::LOG_TAG << "Flashing failed with exception: " << exception.what() << std::endl;
             failure_reason = "Flash I/O error";
             if (m_boot_update_started && !restore_boot_backup()) {
-                failure_reason += std::string("; manual recovery required; backup: ") +
+                failure_reason += std::string("; boot backup retained for recovery by the next update: ") +
                                   FlashConfig::BOOT_BACKUP_DIRECTORY;
             }
             flash_result = mfrERR_WRITE_FLASH_FAILED;
@@ -1061,13 +1275,13 @@ public:
         if (m_lock_file_descriptor < 0) {
             return;
         }
-        const int unmount_result = ::umount(FlashConfig::BOOT_MOUNT_DIRECTORY);
-        const int unmount_error = unmount_result == 0 ? 0 : errno;
-        const bool temporary_mount_root_can_be_removed =
-            unmount_result == 0 || unmount_error == EINVAL || unmount_error == ENOENT;
-        if (!temporary_mount_root_can_be_removed) {
-            std::cerr << FlashConfig::LOG_TAG << "Failed to unmount staged boot partition during cleanup: "
-                      << std::strerror(unmount_error) << std::endl;
+        if (m_is_boot_staging_mounted) {
+            if (::umount(FlashConfig::BOOT_MOUNT_DIRECTORY) == 0 || errno == EINVAL) {
+                m_is_boot_staging_mounted = false;
+            } else {
+                std::cerr << FlashConfig::LOG_TAG << "Failed to unmount staged boot partition during cleanup: "
+                          << std::strerror(errno) << std::endl;
+            }
         }
         bool staged_image_can_be_removed = true;
         if (m_loop_device_file_descriptor >= 0) {
@@ -1091,30 +1305,39 @@ public:
                 m_boot_image_staging_path.clear();
             }
         }
-        if (temporary_mount_root_can_be_removed) {
-            std::error_code remove_error;
-            fs::remove_all(FlashConfig::BOOT_MOUNT_DIRECTORY, remove_error);
+        std::error_code remove_error;
+        if (m_owns_boot_mount_directory && !m_is_boot_staging_mounted) {
+            // Non-recursive: an unexpectedly populated mount point is reported, never emptied.
+            fs::remove(FlashConfig::BOOT_MOUNT_DIRECTORY, remove_error);
             if (remove_error) {
                 std::cerr << FlashConfig::LOG_TAG << "Failed to remove temporary mount directory: "
                           << remove_error.message() << std::endl;
+            } else {
+                m_owns_boot_mount_directory = false;
             }
+        }
+        if (m_owns_boot_backup_directory) {
             remove_error.clear();
             if (m_remove_boot_backup) {
                 fs::remove_all(FlashConfig::BOOT_BACKUP_DIRECTORY, remove_error);
-            } else if (fs::exists(FlashConfig::BOOT_BACKUP_DIRECTORY, remove_error)) {
+                if (remove_error) {
+                    std::cerr << FlashConfig::LOG_TAG << "Boot backup cleanup failed: "
+                              << remove_error.message() << std::endl;
+                }
+            } else {
                 std::cerr << FlashConfig::LOG_TAG << "Boot backup retained at "
                           << FlashConfig::BOOT_BACKUP_DIRECTORY << std::endl;
             }
-            if (remove_error) {
-                std::cerr << FlashConfig::LOG_TAG << "Boot backup cleanup failed: "
-                          << remove_error.message() << std::endl;
-            }
+            m_owns_boot_backup_directory = false;
+        }
+        if (m_owns_temporary_mount_root && !m_owns_boot_mount_directory) {
             remove_error.clear();
             fs::remove(FlashConfig::TEMPORARY_MOUNT_ROOT, remove_error);
             if (remove_error && remove_error != std::errc::directory_not_empty) {
                 std::cerr << FlashConfig::LOG_TAG << "Failed to remove temporary root: "
                           << remove_error.message() << std::endl;
             }
+            m_owns_temporary_mount_root = false;
         }
         if (m_boot_state_lock_descriptor >= 0) {
             if (boot_state_unlock(m_boot_state_lock_descriptor) != 0) {

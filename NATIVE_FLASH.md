@@ -1,8 +1,7 @@
 # Native Flash Application
 
 This document describes the native OTA flasher implemented by `FlashApp.cpp`,
-`FlashProcessor.hpp`, and `FlashConfig.hpp`. The repository does not currently
-contain a `FlashConfig.cpp`; its configuration is defined in the header.
+`FlashProcessor.hpp`, and `FlashConfig.hpp`.
 
 ## Building
 
@@ -131,10 +130,11 @@ decrease, and 100% is reserved for successful completion.
    any mount point is busy, the update fails before anything is written. The
    passive bank is not remounted; it is mounted again at the next boot.
 5. Verifies that `/boot` is a writable vfat mount of `/dev/mmcblk0p1`, then backs
-   it up to `/opt/ota/extblock/old_boot_bkup` before writing either partition.
+   it up to `/tmp/flashapp/old_boot_bkup` before writing either partition.
    Missing, wrong-device, or read-only mounts fail closed. The mount is checked
    again before streaming, boot replacement, rollback, and the bank switch.
-   An existing backup is never overwritten: resolve it manually before retrying.
+   Leftovers from an interrupted run are recovered first; see
+   [Interrupted-Update Recovery](#interrupted-update-recovery).
 6. Streams a raw `.wic` file or the single regular `.wic` member of a
    `.wic.tar.gz` archive. It does not extract the full disk image. The primary
    MBR or GPT partition table is bounds-checked; GPT header and entry-array
@@ -159,7 +159,7 @@ decrease, and 100% is reserved for successful completion.
    restore `/boot` from the backup. Both replacement and rollback preserve
    `/boot/first_use_date.txt` in place, including its FAT creation time; an image
    or backup entry with that name is not copied over the device-specific marker.
-   A failed restoration retains the backup and reports its location for recovery.
+   A failed restoration retains the backup and journal; the next update retries it.
    The stable boot-state lock stays held through backup, streaming, replacement,
    rollback, the bank switch, and cleanup. `mfrSetBootloaderPattern()` uses the
    same lock for its entire configuration backup/update/restore sequence.
@@ -200,8 +200,10 @@ permissions, or unavailable CPUs do not by themselves abort the update.
 
 | Purpose | Configured value |
 | --- | --- |
-| Mount and backup root | `/opt/ota/extblock` |
-| Boot mount and backup | `/opt/ota/extblock/ota_boot`, `/opt/ota/extblock/old_boot_bkup` |
+| Mount and backup root (tmpfs) | `/tmp/flashapp` |
+| Boot mount and backup | `/tmp/flashapp/ota_boot`, `/tmp/flashapp/old_boot_bkup` |
+| Boot update journal | `/tmp/flashapp/boot_update_journal` |
+| Legacy state removed at start | `/opt/ota/extblock` |
 | Staged WIC boot partition | Unique file under `/run` |
 | Boot files | `/boot`, `/boot/cmdline.txt` |
 | Loop device control | `/dev/loop-control`, with devices named `/dev/loop<N>` |
@@ -221,12 +223,54 @@ checks the flag during preparation and backup, reports an abort, and cleans up.
 During the critical phase, termination is deferred until the update or rollback
 finishes; logging, cleanup, and the signal-number exit status happen outside the
 handler.
-Cleanup unmounts the staged boot partition, detaches and closes the loop
-device, removes the staged boot image after detaching it, releases the instance
-lock, and removes the temporary mount directory. The boot backup is deleted
-only after a successful update or confirmed restoration; otherwise it and its
-parent directory are retained. The lock file
+Cleanup releases only resources the processor acquired: it unmounts the staged
+boot partition it mounted, detaches and closes its loop device, removes its
+staged boot image after detaching it, removes the empty staging directories it
+created, and releases its locks. A request rejected before staging (for example,
+a missing image) never unmounts or deletes `/tmp/flashapp` contents. The
+boot backup is deleted only after a successful update or confirmed restoration;
+otherwise it is retained for the next update's recovery. The lock file
 itself remains in place so concurrent invocations always lock the same inode.
+
+## Interrupted-Update Recovery
+
+All flasher work state lives in `/tmp/flashapp` on tmpfs, so a reboot or power
+loss discards it automatically. `/boot/cmdline.txt` keeps selecting the running
+(known-good) bank until the final switch, so after an interrupted update the
+device boots that bank again and the next update simply reflashes the passive
+bank from the start.
+
+`/boot` is changed only at the end of an update: boot files are replaced at
+80–90% and `cmdline.txt` is switched at 90–99%. Before replacement starts, the
+flasher atomically writes a tmpfs journal recording the phase (`replacing`,
+then `switching`) and the target bank. It is removed after the bank switch or
+a confirmed rollback, and only matters when a flasher is killed without a reboot.
+
+Every update, while holding both locks and before taking its own backup, clears
+stale state instead of refusing to flash:
+
+1. Unmounts and deletes the legacy `FlashApp.sh` work area `/opt/ota/extblock`
+   (`ota_boot`, `ota_rootfs`, `target_rootfs` mount points and the persistent
+   `old_boot_bkup`). Mount points are unmounted first, so a still-mounted
+   filesystem is never deleted.
+2. Unmounts and deletes a stale `/tmp/flashapp/ota_boot` staging mount.
+3. If a journal exists, acts on it:
+
+   | Journal | Meaning | Action |
+   | --- | --- | --- |
+   | `replacing` | `/boot` may be partial | Restore `/boot` from the backup |
+   | `switching`, `cmdline.txt` names the target | Bank switch committed | Keep `/boot` |
+   | `switching`, otherwise | Boot files new, switch not committed | Restore `/boot` from the backup |
+   | Unreadable | Unknown | Restore `/boot` from the backup |
+
+4. Deletes every stale `/tmp/flashapp/old_boot_bkup`.
+
+Cleanup fails closed only when a journal exists without a backup, or when an
+unmount or restore fails; the backup and journal are then kept for the next
+attempt. After a committed switch, updates are still rejected until the device
+reboots into the new bank. A power loss while `/boot` itself is being rewritten
+(80–99%) cannot be repaired by software, because the FAT boot partition is not
+A/B.
 
 ## Implementation Notes
 

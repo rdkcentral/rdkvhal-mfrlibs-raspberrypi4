@@ -25,9 +25,19 @@
 #include <cstddef>
 
 namespace FlashConfig {
-    static constexpr const char* TEMPORARY_MOUNT_ROOT = "/opt/ota/extblock";
-    static constexpr const char* BOOT_MOUNT_DIRECTORY = "/opt/ota/extblock/ota_boot";
-    static constexpr const char* BOOT_BACKUP_DIRECTORY = "/opt/ota/extblock/old_boot_bkup";
+    // Flasher state lives on tmpfs so a reboot always discards an interrupted update: cmdline.txt
+    // still selects the running bank until the final switch, so the device reboots into it and
+    // the next update starts clean.
+    static constexpr const char* TEMPORARY_MOUNT_ROOT = "/tmp/flashapp";
+    static constexpr const char* BOOT_MOUNT_DIRECTORY = "/tmp/flashapp/ota_boot";
+    static constexpr const char* BOOT_BACKUP_DIRECTORY = "/tmp/flashapp/old_boot_bkup";
+    // Exists only while /boot is being changed; lets a run after a killed (not rebooted) flasher
+    // decide whether /boot must be restored from the backup.
+    static constexpr const char* BOOT_UPDATE_JOURNAL_PATH = "/tmp/flashapp/boot_update_journal";
+    // Persistent work area of the legacy FlashApp.sh flow; its stale backup and mount points are removed.
+    static constexpr const char* LEGACY_STATE_ROOT = "/opt/ota/extblock";
+    static constexpr const char* LEGACY_MOUNT_POINTS[] = {
+        "/opt/ota/extblock/ota_boot", "/opt/ota/extblock/ota_rootfs", "/opt/ota/extblock/target_rootfs"};
     static constexpr const char* BOOT_DIRECTORY = "/boot";
     static constexpr const char* BOOT_DEVICE = "/dev/mmcblk0p1";
     static constexpr const char* FIRST_USE_DATE_FILENAME = "first_use_date.txt";

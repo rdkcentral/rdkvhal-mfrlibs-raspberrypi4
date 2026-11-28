@@ -45,7 +45,7 @@ covers boot backup, replacement, rollback, bank selection, and configuration
 updates; the lock file is never deleted or replaced.
 Before unmounting or writing, the flasher requires exactly one on-disk `root=`
 argument matching the running bank. A pending bank switch rejects further
-updates until reboot or manual recovery.
+updates until the device reboots into the new bank.
 
 `mfrWriteImage()` returns an error without callbacks if validation, reservation,
 or worker creation fails. Success means the request was accepted, not that the
@@ -59,6 +59,8 @@ Callbacks run on worker threads, never inline on the API caller. Callbacks must 
 throw C++ exceptions. `mfr_term()` waits for the worker and all callbacks before
 releasing library resources; calling it from a flash callback is rejected to
 avoid self-join deadlocks. Do not unload the library before termination completes.
+
+Refer [NATIVE_FLASH.md](./NATIVE_FLASH.md) for `FlashApp` implementation details.
 
 For cross-compilation, initialize the target SDK environment and supply its
 CMake toolchain file:
