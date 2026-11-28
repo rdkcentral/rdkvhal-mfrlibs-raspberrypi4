@@ -364,6 +364,17 @@ private:
             ::close(image_file_descriptor);
             return false;
         }
+        // Autoclear detaches the loop device once its last user exits, even if the flasher is killed.
+        struct loop_info64 loop_info {};
+        loop_info.lo_flags = LO_FLAGS_AUTOCLEAR;
+        if (::ioctl(loop_device_descriptor, LOOP_SET_STATUS64, &loop_info) < 0) {
+            std::cerr << FlashConfig::LOG_TAG << "Failed to enable loop autoclear on " << m_loop_device_path
+                      << ": " << std::strerror(errno) << std::endl;
+            ::ioctl(loop_device_descriptor, LOOP_CLR_FD, 0);
+            ::close(loop_device_descriptor);
+            ::close(image_file_descriptor);
+            return false;
+        }
         m_loop_device_file_descriptor = loop_device_descriptor;
         ::close(image_file_descriptor);
         return true;
@@ -847,7 +858,6 @@ private:
         }
         if (error != 0) {
             ::unlink(temporary_path.c_str());
-            ::unlink(FlashConfig::BOOT_UPDATE_JOURNAL_PATH);
             throw fs::filesystem_error("Failed to record boot update journal", FlashConfig::BOOT_UPDATE_JOURNAL_PATH,
                                        std::error_code(error, std::generic_category()));
         }
@@ -928,10 +938,67 @@ private:
         if (!unmount_stale_mount_point(FlashConfig::BOOT_MOUNT_DIRECTORY, reason)) {
             return false;
         }
+        // Loop devices are autoclear, so once unmounted the orphaned backing images are unused.
+        std::error_code scan_error;
+        const std::size_t prefix_size = std::strlen(FlashConfig::BOOT_IMAGE_STAGING_PREFIX);
+        for (fs::directory_iterator entry(FlashConfig::BOOT_IMAGE_STAGING_DIRECTORY, scan_error), end;
+             !scan_error && entry != end; entry.increment(scan_error)) {
+            const std::string name = entry->path().filename().string();
+            struct stat image_status {};
+            if (name.compare(0, prefix_size, FlashConfig::BOOT_IMAGE_STAGING_PREFIX) != 0 ||
+                ::lstat(entry->path().c_str(), &image_status) != 0 ||
+                !S_ISREG(image_status.st_mode) || image_status.st_uid != 0) {
+                continue;
+            }
+            if (::unlink(entry->path().c_str()) != 0 && errno != ENOENT) {
+                reason = "Stale staged boot image could not be removed: " + entry->path().string();
+                return false;
+            }
+        }
+        if (scan_error) {
+            reason = "Staged boot images could not be scanned: " + scan_error.message();
+            return false;
+        }
         std::error_code remove_error;
         fs::remove_all(FlashConfig::BOOT_MOUNT_DIRECTORY, remove_error);
         if (remove_error) {
             reason = "Stale boot staging directory could not be removed: " + remove_error.message();
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * @brief Ensure the work root is a root-owned, private, non-symlink directory.
+     * Only root can then create the journal and backups that recovery trusts.
+     */
+    bool secure_work_root(std::string& reason)
+    {
+        struct stat link_status {};
+        if (::lstat(FlashConfig::TEMPORARY_MOUNT_ROOT, &link_status) == 0 && S_ISLNK(link_status.st_mode) &&
+            ::unlink(FlashConfig::TEMPORARY_MOUNT_ROOT) != 0) {
+            reason = std::string("Work root symlink could not be removed: ") + std::strerror(errno);
+            return false;
+        }
+        if (::mkdir(FlashConfig::TEMPORARY_MOUNT_ROOT, S_IRWXU) == 0) {
+            m_owns_temporary_mount_root = true;
+        } else if (errno != EEXIST) {
+            reason = std::string("Work root could not be created: ") + std::strerror(errno);
+            return false;
+        }
+        const int root_descriptor = ::open(FlashConfig::TEMPORARY_MOUNT_ROOT,
+                                           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (root_descriptor < 0) {
+            reason = std::string("Work root could not be opened safely: ") + std::strerror(errno);
+            return false;
+        }
+        struct stat root_status {};
+        const bool trusted = ::fstat(root_descriptor, &root_status) == 0 && S_ISDIR(root_status.st_mode) &&
+                             root_status.st_uid == 0 && (root_status.st_mode & (S_IRWXG | S_IRWXO)) == 0;
+        ::close(root_descriptor);
+        if (!trusted) {
+            reason = std::string("Work root is not a private root-owned directory: ") +
+                     FlashConfig::TEMPORARY_MOUNT_ROOT;
             return false;
         }
         return true;
@@ -1036,6 +1103,9 @@ private:
                         "Boot state could not be locked; retry after other boot operations finish");
         }
         std::string recovery_reason;
+        if (!secure_work_root(recovery_reason)) {
+            return fail(mfrERR_WRITE_FLASH_FAILED, recovery_reason);
+        }
         const mfrError_t recovery_result = recover_interrupted_update(recovery_reason);
         if (recovery_result != mfrERR_NONE) {
             return fail(recovery_result, recovery_reason);
@@ -1073,9 +1143,6 @@ private:
         }
 
         // Prepare the boot directory for flashing by creating a backup and staging the new contents.
-        const fs::path temporary_mount_root(FlashConfig::TEMPORARY_MOUNT_ROOT);
-        fs::create_directories(temporary_mount_root.parent_path());
-        m_owns_temporary_mount_root = fs::create_directory(temporary_mount_root);
         if (!fs::create_directory(FlashConfig::BOOT_MOUNT_DIRECTORY)) {
             return fail(mfrERR_WRITE_FLASH_FAILED, "Boot staging directory was created by another process");
         }

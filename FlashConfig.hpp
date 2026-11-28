@@ -38,6 +38,9 @@ namespace FlashConfig {
     static constexpr const char* LEGACY_STATE_ROOT = "/opt/ota/extblock";
     static constexpr const char* LEGACY_MOUNT_POINTS[] = {
         "/opt/ota/extblock/ota_boot", "/opt/ota/extblock/ota_rootfs", "/opt/ota/extblock/target_rootfs"};
+    // Staged boot images created by WicStreamFlasher: <dir>/<prefix>XXXXXX.
+    static constexpr const char* BOOT_IMAGE_STAGING_DIRECTORY = "/run";
+    static constexpr const char* BOOT_IMAGE_STAGING_PREFIX = "flashapp-boot-";
     static constexpr const char* BOOT_DIRECTORY = "/boot";
     static constexpr const char* BOOT_DEVICE = "/dev/mmcblk0p1";
     static constexpr const char* FIRST_USE_DATE_FILENAME = "first_use_date.txt";
